@@ -61,21 +61,29 @@
     <!-- Chat -->
     <main class="chat-main">
       <header class="chat-header">
-        <button id="menu-btn" class="menu-btn" title="菜单">☰</button>
-        <span id="chat-title" class="chat-title">新会话</span>
-        <button id="chat-agent-btn" class="chat-agent-btn" type="button" aria-haspopup="menu" aria-expanded="false">Claude</button>
+        <div class="chat-header-top">
+          <div class="chat-header-main">
+            <button id="menu-btn" class="menu-btn" title="菜单">☰</button>
+            <span id="chat-title" class="chat-title">新会话</span>
+          </div>
+          <div class="chat-header-actions">
+            <button id="chat-agent-btn" class="chat-agent-btn" type="button" aria-haspopup="menu" aria-expanded="false">Claude</button>
+            <span id="chat-runtime-state" class="chat-runtime-state" hidden>运行中</span>
+            <select id="mode-select" class="mode-select" title="权限模式">
+              <option value="yolo">YOLO</option>
+              <option value="default">默认</option>
+              <option value="plan">Plan</option>
+            </select>
+            <span id="cost-display" class="cost-display" hidden></span>
+          </div>
+        </div>
+        <div id="chat-cwd-row" class="chat-header-bottom" hidden>
+          <span id="chat-cwd" class="chat-cwd" hidden></span>
+        </div>
         <div id="chat-agent-menu" class="chat-agent-menu" hidden>
           <button type="button" class="chat-agent-option active" data-agent="claude">Claude</button>
           <button type="button" class="chat-agent-option" data-agent="codex">Codex</button>
         </div>
-        <span id="chat-runtime-state" class="chat-runtime-state" hidden>运行中</span>
-        <span id="chat-cwd" class="chat-cwd" hidden></span>
-        <select id="mode-select" class="mode-select" title="权限模式">
-          <option value="yolo">YOLO</option>
-          <option value="default">默认</option>
-          <option value="plan">Plan</option>
-        </select>
-        <span id="cost-display" class="cost-display" hidden></span>
       </header>
 
       <div class="messages-wrap">

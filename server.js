@@ -17,6 +17,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const PORT = parseInt(process.env.PORT) || 8002;
+const HOST = process.env.HOST || '127.0.0.1';
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
 const CODEX_PATH = process.env.CODEX_PATH || 'codex';
 const CONFIG_DIR = process.env.CC_WEB_CONFIG_DIR || path.join(__dirname, 'config');
@@ -521,7 +522,7 @@ const pendingSlashCommands = new Map();
 // Pending compact retry metadata: sessionId -> { text: string, mode: string, reason: string }
 const pendingCompactRetries = new Map();
 
-// Active processes: sessionId -> { pid, ws, fullText, toolCalls, lastCost, tailer }
+// Active processes: sessionId -> { pid, ws, fullText, toolCalls, assistantSteps, lastCost, tailer }
 const activeProcesses = new Map();
 
 // Track which session each ws is viewing: ws -> sessionId
@@ -1033,10 +1034,25 @@ function normalizeSession(session) {
   if (Array.isArray(session.messages)) {
     session.messages = session.messages.map((message) => {
       if (!message || typeof message !== 'object') return message;
-      if (message.attachments) {
-        return { ...message, attachments: normalizeMessageAttachments(message.attachments) };
+      const nextMessage = { ...message };
+      if (nextMessage.attachments) {
+        nextMessage.attachments = normalizeMessageAttachments(nextMessage.attachments);
       }
-      return message;
+      if (nextMessage.role === 'assistant') {
+        if (!Array.isArray(nextMessage.toolCalls)) nextMessage.toolCalls = [];
+        if (!Array.isArray(nextMessage.steps) || nextMessage.steps.length === 0) {
+          const steps = [];
+          if (typeof nextMessage.content === 'string' && nextMessage.content.trim()) {
+            steps.push({ type: 'text', content: nextMessage.content });
+          }
+          nextMessage.toolCalls.forEach((tool) => {
+            if (!tool || typeof tool !== 'object') return;
+            steps.push({ type: 'tool_call', ...tool });
+          });
+          nextMessage.steps = steps;
+        }
+      }
+      return nextMessage;
     });
   }
   return session;
@@ -1392,11 +1408,12 @@ function handleProcessComplete(sessionId, exitCode, signal) {
 
   // Save result to session
   const session = loadSession(sessionId);
-  if (session && entry.fullText) {
+  if (session && (entry.fullText || (entry.assistantSteps || []).length > 0)) {
     session.messages.push({
       role: 'assistant',
       content: entry.fullText,
       toolCalls: entry.toolCalls || [],
+      steps: entry.assistantSteps || [],
       timestamp: new Date().toISOString(),
     });
     session.updated = new Date().toISOString();
@@ -1545,7 +1562,7 @@ function recoverProcesses() {
       if (isProcessRunning(pid)) {
         console.log(`[recovery] Re-attaching to session ${sessionId} (PID ${pid})`);
         plog('INFO', 'recovery_alive', { sessionId: sessionId.slice(0, 8), pid, agent });
-        const entry = { pid, ws: null, agent, fullText: '', toolCalls: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
+        const entry = { pid, ws: null, agent, fullText: '', toolCalls: [], assistantSteps: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
         activeProcesses.set(sessionId, entry);
 
         if (fs.existsSync(outputPath)) {
@@ -1562,7 +1579,7 @@ function recoverProcesses() {
         console.log(`[recovery] Processing completed output for session ${sessionId}`);
         plog('INFO', 'recovery_dead', { sessionId: sessionId.slice(0, 8), pid, agent });
         if (fs.existsSync(outputPath)) {
-          const tempEntry = { pid: 0, ws: null, agent, fullText: '', toolCalls: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
+          const tempEntry = { pid: 0, ws: null, agent, fullText: '', toolCalls: [], assistantSteps: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
           const content = fs.readFileSync(outputPath, 'utf8');
           for (const line of content.split('\n')) {
             if (!line.trim()) continue;
@@ -1571,11 +1588,12 @@ function recoverProcesses() {
               processRuntimeEvent(tempEntry, event, sessionId);
             } catch {}
           }
-          if (session && tempEntry.fullText) {
+          if (session && (tempEntry.fullText || (tempEntry.assistantSteps || []).length > 0)) {
             session.messages.push({
               role: 'assistant',
               content: tempEntry.fullText,
               toolCalls: tempEntry.toolCalls || [],
+              steps: tempEntry.assistantSteps || [],
               timestamp: new Date().toISOString(),
             });
             session.updated = new Date().toISOString();
@@ -1850,7 +1868,10 @@ wss.on('connection', (ws, req) => {
         handleImportCodexSession(ws, msg);
         break;
       case 'list_cwd_suggestions':
-        handleListCwdSuggestions(ws);
+        handleListCwdSuggestions(ws, msg);
+        break;
+      case 'browse_directories':
+        handleBrowseDirectories(ws, msg);
         break;
       default:
         wsSend(ws, { type: 'error', message: `Unknown type: ${msg.type}` });
@@ -2639,6 +2660,7 @@ function handleLoadSession(ws, sessionId) {
       sessionId,
       text: entry.fullText || '',
       toolCalls: entry.toolCalls || [],
+      steps: entry.assistantSteps || [],
     });
   }
 }
@@ -3030,6 +3052,7 @@ function handleMessage(ws, msg, options = {}) {
     fullText: '',
     attachments: resolvedAttachments,
     toolCalls: [],
+    assistantSteps: [],
     lastCost: null,
     lastUsage: null,
     lastError: null,
@@ -3160,6 +3183,7 @@ const CLAUDE_PROJECTS_DIR = path.join(process.env.HOME || process.env.USERPROFIL
 const CODEX_SESSIONS_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'sessions');
 const CODEX_STATE_DB_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'state_5.sqlite');
 const CODEX_LOG_DB_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'logs_1.sqlite');
+const DIRECTORY_BROWSER_LIMIT = 200;
 
 function resolveClaudeSessionLocalMeta(claudeSessionId) {
   if (!claudeSessionId) return null;
@@ -3219,16 +3243,32 @@ function parseJsonlToMessages(lines) {
       if (!Array.isArray(blocks)) continue;
       let content = '';
       const toolCalls = [];
+      const steps = [];
+      const pendingToolCalls = new Map();
       for (const b of blocks) {
         if (b.type === 'text' && b.text) {
           content += b.text;
+          const last = steps[steps.length - 1];
+          if (last && last.type === 'text') last.content = `${last.content || ''}${b.text}`;
+          else steps.push({ type: 'text', content: b.text });
         } else if (b.type === 'tool_use') {
-          toolCalls.push({ name: b.name, id: b.id, input: b.input, done: true });
+          const tc = { type: 'tool_call', name: b.name, id: b.id, input: b.input, done: true };
+          toolCalls.push(tc);
+          steps.push(tc);
+          pendingToolCalls.set(b.id, tc);
+        } else if (b.type === 'tool_result') {
+          const resultText = typeof b.content === 'string'
+            ? b.content
+            : Array.isArray(b.content)
+              ? b.content.map((item) => item.text || '').join('\n')
+              : JSON.stringify(b.content || '');
+          const tc = pendingToolCalls.get(b.tool_use_id);
+          if (tc) tc.result = resultText.slice(0, 2000);
         }
         // skip thinking blocks
       }
       if (content.trim() || toolCalls.length > 0) {
-        messages.push({ role: 'assistant', content, toolCalls, timestamp: entry.timestamp || null });
+        messages.push({ role: 'assistant', content, toolCalls, steps, timestamp: entry.timestamp || null });
       }
     }
     // skip other types
@@ -3507,12 +3547,236 @@ function handleImportCodexSession(ws, msg) {
   sendSessionList(ws);
 }
 
-function handleListCwdSuggestions(ws) {
-  const paths = new Set();
-  // Always include HOME
-  const home = process.env.HOME || process.env.USERPROFILE || '';
-  if (home) paths.add(home);
-  wsSend(ws, { type: 'cwd_suggestions', paths: Array.from(paths).sort() });
+function addCwdSuggestion(map, cwd, meta = {}) {
+  const raw = String(cwd || '').trim();
+  if (!raw) return;
+  const normalizedPath = path.normalize(raw);
+  if (!normalizedPath) return;
+  const key = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
+  let item = map.get(key);
+  if (!item) {
+    item = {
+      path: normalizedPath,
+      title: '',
+      updatedAt: null,
+      totalCount: 0,
+      importedCount: 0,
+      unimportedCount: 0,
+      sourceKinds: new Set(),
+    };
+    map.set(key, item);
+  }
+  item.totalCount += 1;
+  if (meta.imported === false) item.unimportedCount += 1;
+  else item.importedCount += 1;
+  if (meta.sourceKind) item.sourceKinds.add(meta.sourceKind);
+  if (meta.updatedAt) {
+    const nextTs = new Date(meta.updatedAt).getTime();
+    const prevTs = item.updatedAt ? new Date(item.updatedAt).getTime() : 0;
+    if (!item.updatedAt || (Number.isFinite(nextTs) && nextTs > prevTs)) {
+      item.updatedAt = meta.updatedAt;
+      if (meta.title) item.title = meta.title;
+    }
+  }
+  if (!item.title && meta.title) item.title = meta.title;
+}
+
+function collectCwdSuggestionItems(agent) {
+  const targetAgent = normalizeAgent(agent);
+  const items = new Map();
+
+  try {
+    for (const f of fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'))) {
+      try {
+        const session = normalizeSession(JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')));
+        if (getSessionAgent(session) !== targetAgent) continue;
+        if ((session.taskMode || 'local') !== 'local') continue;
+        addCwdSuggestion(items, session.cwd, {
+          title: session.title || '',
+          updatedAt: session.updated || session.created || null,
+          imported: true,
+          sourceKind: 'cc-web',
+        });
+      } catch {}
+    }
+  } catch {}
+
+  if (targetAgent === 'claude') {
+    const imported = getImportedSessionIds();
+    try {
+      const dirs = fs.readdirSync(CLAUDE_PROJECTS_DIR).filter(d => {
+        try { return fs.statSync(path.join(CLAUDE_PROJECTS_DIR, d)).isDirectory(); } catch { return false; }
+      });
+      for (const dir of dirs) {
+        const dirPath = path.join(CLAUDE_PROJECTS_DIR, dir);
+        let files = [];
+        try { files = fs.readdirSync(dirPath).filter(f => f.endsWith('.jsonl')); } catch {}
+        for (const f of files) {
+          const sessionId = f.replace('.jsonl', '');
+          if (imported.has(sessionId)) continue;
+          const filePath = path.join(dirPath, f);
+          try {
+            const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+            let title = sessionId.slice(0, 20);
+            let cwd = null;
+            let updatedAt = null;
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              try {
+                const entry = JSON.parse(trimmed);
+                if (entry.timestamp) updatedAt = entry.timestamp;
+                if (entry.type === 'user') {
+                  if (!cwd && entry.cwd) cwd = entry.cwd;
+                  if (title === sessionId.slice(0, 20)) {
+                    const raw = entry.message?.content;
+                    let text = '';
+                    if (typeof raw === 'string') text = raw;
+                    else if (Array.isArray(raw)) text = raw.filter(b => b.type === 'text').map(b => b.text || '').join('');
+                    if (text.trim()) title = text.trim().slice(0, 80).replace(/\n/g, ' ');
+                  }
+                }
+              } catch {}
+            }
+            addCwdSuggestion(items, cwd, {
+              title,
+              updatedAt,
+              imported: false,
+              sourceKind: 'claude-native',
+            });
+          } catch {}
+        }
+      }
+    } catch {}
+  } else {
+    const imported = getImportedCodexThreadIds();
+    const seen = new Set();
+    for (const filePath of getCodexRolloutFiles()) {
+      const parsed = parseCodexRolloutFile(filePath);
+      const threadId = parsed?.meta?.threadId;
+      if (!threadId || seen.has(threadId) || imported.has(threadId)) continue;
+      seen.add(threadId);
+      addCwdSuggestion(items, parsed.meta.cwd, {
+        title: parsed.meta.title || threadId.slice(0, 20),
+        updatedAt: parsed.meta.updatedAt || null,
+        imported: false,
+        sourceKind: 'codex-rollout',
+      });
+    }
+  }
+
+  return Array.from(items.values())
+    .map((item) => ({ ...item, sourceKinds: Array.from(item.sourceKinds) }))
+    .sort((a, b) => {
+      const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return a.path.localeCompare(b.path, 'zh-CN', { numeric: true, sensitivity: 'base' });
+    });
+}
+
+function getHomeDir() {
+  return process.env.HOME || process.env.USERPROFILE || process.cwd();
+}
+
+function getDirectoryRoots() {
+  const roots = [];
+  const seen = new Set();
+  const pushRoot = (dirPath, label) => {
+    if (!dirPath) return;
+    let resolved;
+    try { resolved = path.resolve(dirPath); } catch { return; }
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) return;
+    try {
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) return;
+    } catch {
+      return;
+    }
+    seen.add(key);
+    roots.push({ path: resolved, label: label || resolved });
+  };
+
+  const home = getHomeDir();
+  pushRoot(home, 'Home');
+  if (process.platform === 'win32') {
+    for (let code = 67; code <= 90; code += 1) {
+      const drive = `${String.fromCharCode(code)}:\\`;
+      pushRoot(drive, drive);
+    }
+  } else {
+    pushRoot('/', '/');
+  }
+  return roots;
+}
+
+function findBrowsableDirectory(inputPath) {
+  let target = String(inputPath || '').trim();
+  if (!target) target = getHomeDir();
+  try { target = path.resolve(target); } catch { target = getHomeDir(); }
+
+  while (true) {
+    try {
+      if (fs.existsSync(target) && fs.statSync(target).isDirectory()) return target;
+    } catch {}
+    const parent = path.dirname(target);
+    if (!parent || parent === target) break;
+    target = parent;
+  }
+  return getHomeDir();
+}
+
+function listBrowsableDirectories(dirPath) {
+  try {
+    const dirs = fs.readdirSync(dirPath, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+    return {
+      entries: dirs.slice(0, DIRECTORY_BROWSER_LIMIT).map((entry) => ({
+        name: entry.name,
+        path: path.join(dirPath, entry.name),
+      })),
+      truncated: dirs.length > DIRECTORY_BROWSER_LIMIT,
+      error: '',
+    };
+  } catch (error) {
+    return { entries: [], truncated: false, error: error.message || '目录读取失败' };
+  }
+}
+
+function handleListCwdSuggestions(ws, msg) {
+  const agent = normalizeAgent(msg?.agent);
+  const items = collectCwdSuggestionItems(agent);
+  wsSend(ws, { type: 'cwd_suggestions', agent, items });
+}
+
+function handleBrowseDirectories(ws, msg) {
+  const requestedPath = String(msg?.path || '').trim();
+  const fallbackPath = findBrowsableDirectory(requestedPath);
+  const listResult = listBrowsableDirectories(fallbackPath);
+  let error = listResult.error || '';
+
+  if (!error && requestedPath) {
+    try {
+      const resolvedRequested = path.resolve(requestedPath);
+      if (resolvedRequested !== fallbackPath) {
+        error = '目录不存在或暂不可访问，已切换到最近可用的父目录。';
+      }
+    } catch {
+      error = '目录路径无效，已切换到默认目录。';
+    }
+  }
+
+  const parentPath = path.dirname(fallbackPath);
+  wsSend(ws, {
+    type: 'directory_browser',
+    currentPath: fallbackPath,
+    parentPath: parentPath === fallbackPath ? null : parentPath,
+    roots: getDirectoryRoots(),
+    entries: listResult.entries,
+    truncated: !!listResult.truncated,
+    error,
+  });
 }
 
 // === Startup ===
@@ -3536,8 +3800,8 @@ setInterval(() => {
   plog('INFO', 'heartbeat', { activeCount: procs.length, wsClients: wss.clients.size, processes: procs });
 }, 60000);
 
-plog('INFO', 'server_start', { port: PORT });
+plog('INFO', 'server_start', { port: PORT, host: HOST });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`CC-Web server listening on 127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`CC-Web server listening on ${HOST}:${PORT}`);
 });

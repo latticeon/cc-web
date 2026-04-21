@@ -86,8 +86,6 @@
   let pendingText = '';
   let renderTimer = null;
   let activeToolCalls = new Map();
-  let toolGroupCount = 0;   // 当前 .msg-tools 直接子节点数（含已有父目录）
-  let hasGrouped = false;  // 本次输出是否已触发过折叠
   let cmdMenuIndex = -1;
   let currentMode = 'yolo';
   let currentModel = 'opus';
@@ -129,6 +127,7 @@
   const chatAgentBtn = $('#chat-agent-btn');
   const chatAgentMenu = $('#chat-agent-menu');
   const chatRuntimeState = $('#chat-runtime-state');
+  const chatCwdRow = $('#chat-cwd-row');
   const chatCwd = $('#chat-cwd');
   const costDisplay = $('#cost-display');
   const attachmentTray = $('#attachment-tray');
@@ -668,7 +667,8 @@
   function estimateSessionMessageWeight(message) {
     const content = typeof message?.content === 'string' ? message.content.length : JSON.stringify(message?.content || '').length;
     const toolCalls = Array.isArray(message?.toolCalls) ? JSON.stringify(message.toolCalls).length : 0;
-    return content + toolCalls + 64;
+    const steps = Array.isArray(message?.steps) ? JSON.stringify(message.steps).length : 0;
+    return content + toolCalls + steps + 64;
   }
 
   function estimateSessionSnapshotWeight(snapshot) {
@@ -1047,22 +1047,18 @@
     return sessions.filter((s) => normalizeAgent(s.agent) === currentAgent);
   }
 
-  function shouldOverlayRuntimeBadge() {
-    return window.matchMedia('(max-width: 768px), (pointer: coarse)').matches;
-  }
-
   function updateCwdBadge() {
     if (!chatCwd) return;
     if (currentCwd) {
-      const parts = currentCwd.replace(/\/+$/, '').split('/');
-      const short = parts.slice(-2).join('/') || currentCwd;
-      chatCwd.textContent = '~/' + short;
+      chatCwd.textContent = currentCwd;
       chatCwd.title = currentCwd;
     } else {
       chatCwd.textContent = '';
       chatCwd.title = '';
     }
-    chatCwd.hidden = !currentCwd || (currentSessionRunning && shouldOverlayRuntimeBadge());
+    const hidden = !currentCwd;
+    chatCwd.hidden = hidden;
+    if (chatCwdRow) chatCwdRow.hidden = hidden;
   }
 
   function setCurrentSessionRunningState(isRunning) {
@@ -1625,30 +1621,34 @@
         } else {
           sendBtn.hidden = true;
           abortBtn.hidden = false;
-          toolGroupCount = 0;
-          hasGrouped = false;
           activeToolCalls.clear();
-          const toolsDiv = document.querySelector('#streaming-msg .msg-tools');
-          if (toolsDiv) toolsDiv.innerHTML = '';
         }
-        pendingText = msg.text || '';
-        flushRender();
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
-          for (const tc of msg.toolCalls) {
-            activeToolCalls.set(tc.id, {
-              name: tc.name,
-              input: tc.input,
-              result: tc.result,
-              kind: tc.kind || null,
-              meta: tc.meta || null,
-              done: tc.done,
-            });
-            appendToolCall(tc.id, tc.name, tc.input, tc.done, tc.kind || null, tc.meta || null);
-            if (tc.done && tc.result) {
-              updateToolCall(tc.id, tc.result);
-            }
+        const streamBubble = document.querySelector('#streaming-msg .msg-bubble');
+        const resumeSteps = Array.isArray(msg.steps) && msg.steps.length > 0
+          ? msg.steps
+          : buildLegacyAssistantSteps(msg.text || '', msg.toolCalls || []);
+        if (streamBubble) {
+          renderAssistantStepsIntoBubble(streamBubble, resumeSteps);
+        }
+        const toolSteps = resumeSteps.filter((step) => step && step.type === 'tool_call');
+        toolSteps.forEach((tc) => {
+          activeToolCalls.set(tc.id, {
+            name: tc.name,
+            input: tc.input,
+            result: tc.result,
+            kind: tc.kind || null,
+            meta: tc.meta || null,
+            done: tc.done,
+          });
+        });
+        const lastStep = resumeSteps[resumeSteps.length - 1];
+        pendingText = lastStep?.type === 'text' ? (lastStep.content || '') : '';
+        if (resumeSteps.length === 0) flushRender();
+        toolSteps.forEach((tc) => {
+          if (tc.done && tc.result) {
+            updateToolCall(tc.id, tc.result);
           }
-        }
+        });
         break;
 
       case 'error':
@@ -1726,7 +1726,11 @@
         break;
 
       case 'cwd_suggestions':
-        if (typeof _onCwdSuggestions === 'function') _onCwdSuggestions(msg.paths || []);
+        if (typeof _onCwdSuggestions === 'function') _onCwdSuggestions(msg);
+        break;
+
+      case 'directory_browser':
+        if (typeof _onDirectoryBrowser === 'function') _onDirectoryBrowser(msg);
         break;
 
       case 'update_info':
@@ -1741,8 +1745,6 @@
     setCurrentSessionRunningState(true);
     pendingText = '';
     activeToolCalls.clear();
-    toolGroupCount = 0;
-    hasGrouped = false;
     sendBtn.hidden = true;
     abortBtn.hidden = false;
     // 不禁用输入框，允许用户继续输入（但无法发送）
@@ -1752,16 +1754,12 @@
 
     const msgEl = createMsgElement('assistant', '');
     msgEl.id = 'streaming-msg';
-    // 流式消息 bubble 拆为 .msg-text 和 .msg-tools 两个子容器
     const bubble = msgEl.querySelector('.msg-bubble');
     bubble.innerHTML = '';
-    const textDiv = document.createElement('div');
-    textDiv.className = 'msg-text';
-    textDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
-    const toolsDiv = document.createElement('div');
-    toolsDiv.className = 'msg-tools';
-    bubble.appendChild(textDiv);
-    bubble.appendChild(toolsDiv);
+    const stepsDiv = document.createElement('div');
+    stepsDiv.className = 'assistant-steps';
+    stepsDiv.appendChild(createAssistantTextStepElement(''));
+    bubble.appendChild(stepsDiv);
     messagesDiv.appendChild(msgEl);
     scrollToBottom();
   }
@@ -1775,43 +1773,15 @@
 
     if (pendingText) flushRender();
 
-    const typing = document.querySelector('.typing-indicator');
-    if (typing) typing.remove();
-
     const streamEl = document.getElementById('streaming-msg');
     if (streamEl) {
-      // 若本轮出现过父目录，把末尾散落的 .tool-call 也一并收入同一父节点
-      if (hasGrouped) {
-        const toolsDiv = streamEl.querySelector('.msg-tools');
-        if (toolsDiv) {
-          const loose = Array.from(toolsDiv.children).filter(c => c.classList.contains('tool-call'));
-          if (loose.length > 0) {
-            let group = toolsDiv.querySelector(':scope > .tool-group');
-            if (!group) {
-              group = document.createElement('details');
-              group.className = 'tool-group';
-              const gs = document.createElement('summary');
-              gs.className = 'tool-group-summary';
-              group.appendChild(gs);
-              const inner = document.createElement('div');
-              inner.className = 'tool-group-inner';
-              group.appendChild(inner);
-              toolsDiv.insertBefore(group, toolsDiv.firstChild);
-            }
-            const inner = group.querySelector('.tool-group-inner');
-            loose.forEach(c => inner.appendChild(c));
-            _refreshGroupSummary(group);
-          }
-        }
-      }
+      removeTrailingEmptyAssistantTextStep(streamEl);
       streamEl.removeAttribute('id');
     }
 
     if (sessionId) currentSessionId = sessionId;
     pendingText = '';
     activeToolCalls.clear();
-    toolGroupCount = 0;
-    hasGrouped = false;
   }
 
   // --- Rendering ---
@@ -1826,11 +1796,9 @@
   function flushRender() {
     const streamEl = document.getElementById('streaming-msg');
     if (!streamEl) return;
-    const bubble = streamEl.querySelector('.msg-bubble');
-    if (!bubble) return;
-    let textDiv = bubble.querySelector('.msg-text');
-    if (!textDiv) { textDiv = bubble; }
-    textDiv.innerHTML = renderMarkdown(pendingText);
+    const textStep = ensureStreamingTextStep(streamEl);
+    if (!textStep) return;
+    setAssistantTextStepContent(textStep, pendingText);
     scrollToBottom();
   }
 
@@ -1838,6 +1806,102 @@
     if (!text) return '<div class="typing-indicator"><span></span><span></span><span></span></div>';
     try { return marked.parse(text); }
     catch { return escapeHtml(text); }
+  }
+
+  function buildLegacyAssistantSteps(content, toolCalls = []) {
+    const steps = [];
+    if (typeof content === 'string' && content.trim()) {
+      steps.push({ type: 'text', content });
+    }
+    if (Array.isArray(toolCalls)) {
+      toolCalls.forEach((tool) => {
+        if (!tool || typeof tool !== 'object') return;
+        steps.push({ type: 'tool_call', ...deepClone(tool) });
+      });
+    }
+    return steps;
+  }
+
+  function getAssistantMessageSteps(message) {
+    if (Array.isArray(message?.steps) && message.steps.length > 0) {
+      return deepClone(message.steps);
+    }
+    return buildLegacyAssistantSteps(message?.content || '', message?.toolCalls || []);
+  }
+
+  function ensureAssistantStepsContainer(bubble) {
+    let stepsDiv = bubble.querySelector('.assistant-steps');
+    if (!stepsDiv) {
+      stepsDiv = document.createElement('div');
+      stepsDiv.className = 'assistant-steps';
+      bubble.appendChild(stepsDiv);
+    }
+    return stepsDiv;
+  }
+
+  function createAssistantTextStepElement(text = '') {
+    const step = document.createElement('div');
+    step.className = 'assistant-step assistant-step-text';
+    step.dataset.stepType = 'text';
+    const textDiv = document.createElement('div');
+    textDiv.className = 'msg-text';
+    textDiv.innerHTML = renderMarkdown(text);
+    step.appendChild(textDiv);
+    return step;
+  }
+
+  function setAssistantTextStepContent(step, text) {
+    const textDiv = step.querySelector('.msg-text');
+    if (textDiv) textDiv.innerHTML = renderMarkdown(text);
+  }
+
+  function createAssistantToolStepElement(tool) {
+    const step = document.createElement('div');
+    step.className = 'assistant-step assistant-step-tool';
+    step.dataset.stepType = 'tool';
+    step.appendChild(createToolCallElement(tool.id || `tool-${Math.random().toString(36).slice(2)}`, tool, !!tool.done));
+    return step;
+  }
+
+  function removeTrailingEmptyAssistantTextStep(streamEl) {
+    if (!streamEl) return;
+    const bubble = streamEl.querySelector('.msg-bubble');
+    const stepsDiv = bubble ? bubble.querySelector('.assistant-steps') : null;
+    const last = stepsDiv ? stepsDiv.lastElementChild : null;
+    if (!last || last.dataset.stepType !== 'text') return;
+    const textDiv = last.querySelector('.msg-text');
+    if (!textDiv || textDiv.textContent.trim()) return;
+    last.remove();
+  }
+
+  function ensureStreamingTextStep(streamEl) {
+    if (!streamEl) return null;
+    const bubble = streamEl.querySelector('.msg-bubble');
+    if (!bubble) return null;
+    const stepsDiv = ensureAssistantStepsContainer(bubble);
+    const last = stepsDiv.lastElementChild;
+    if (last && last.dataset.stepType === 'text') return last;
+    const step = createAssistantTextStepElement('');
+    stepsDiv.appendChild(step);
+    return step;
+  }
+
+  function renderAssistantStepsIntoBubble(bubble, steps, attachments = []) {
+    if (!bubble) return;
+    bubble.innerHTML = '';
+    const stepsDiv = ensureAssistantStepsContainer(bubble);
+    (Array.isArray(steps) ? steps : []).forEach((step) => {
+      if (!step || typeof step !== 'object') return;
+      if (step.type === 'text') {
+        if (!String(step.content || '').trim()) return;
+        stepsDiv.appendChild(createAssistantTextStepElement(step.content));
+        return;
+      }
+      stepsDiv.appendChild(createAssistantToolStepElement(step));
+    });
+    if (attachments.length > 0) {
+      bubble.insertAdjacentHTML('beforeend', renderAttachmentLabels(attachments));
+    }
   }
 
   function createMsgElement(role, content, attachments = []) {
@@ -1877,7 +1941,6 @@
         bubble.insertAdjacentHTML('beforeend', renderAttachmentLabels(attachments));
       }
     } else {
-      bubble.innerHTML = content ? renderMarkdown(content) : '';
       if (attachments.length > 0) {
         bubble.insertAdjacentHTML('beforeend', renderAttachmentLabels(attachments));
       }
@@ -1977,51 +2040,13 @@
   }
 
 	  function buildMsgElement(m) {
-	    const el = createMsgElement(m.role, m.content, m.attachments || []);
-	    if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+	    const el = createMsgElement(m.role, m.role === 'assistant' ? '' : m.content, m.role === 'assistant' ? [] : (m.attachments || []));
+	    if (m.role === 'assistant') {
 	      const bubble = el.querySelector('.msg-bubble');
-	      const FOLD_AT = 3;
-	      let grouped = false;
-	      for (const tc of m.toolCalls) {
-	        const details = createToolCallElement(tc.id || `saved-${Math.random().toString(36).slice(2)}`, tc, true);
-
-	        // 散落的 .tool-call 达到 FOLD_AT 个时，移入唯一 .tool-group
-        const loose = Array.from(bubble.children).filter(c => c.classList.contains('tool-call'));
-        if (loose.length >= FOLD_AT) {
-          let group = bubble.querySelector(':scope > .tool-group');
-          if (!group) {
-            group = document.createElement('details');
-            group.className = 'tool-group';
-            const gs = document.createElement('summary');
-            gs.className = 'tool-group-summary';
-            group.appendChild(gs);
-            const inner = document.createElement('div');
-            inner.className = 'tool-group-inner';
-            group.appendChild(inner);
-            bubble.insertBefore(group, bubble.firstChild);
-            grouped = true;
-          }
-          const inner = group.querySelector('.tool-group-inner');
-          loose.forEach(c => inner.appendChild(c));
-          _refreshGroupSummary(group);
-        }
-        bubble.appendChild(details);
-      }
-      // 结束时若出现过父目录，收尾散落项
-      if (grouped) {
-        const loose = Array.from(bubble.children).filter(c => c.classList.contains('tool-call'));
-        if (loose.length > 0) {
-          const group = bubble.querySelector(':scope > .tool-group');
-          if (group) {
-            const inner = group.querySelector('.tool-group-inner');
-            loose.forEach(c => inner.appendChild(c));
-            _refreshGroupSummary(group);
-          }
-        }
-      }
-    }
-    return el;
-  }
+	      renderAssistantStepsIntoBubble(bubble, getAssistantMessageSteps(m), m.attachments || []);
+	    }
+	    return el;
+	  }
 
   function renderMessages(messages, options = {}) {
     renderEpoch++;
@@ -2340,47 +2365,18 @@
   function appendToolCall(toolUseId, name, input, done, kind = null, meta = null) {
     const streamEl = document.getElementById('streaming-msg');
     if (!streamEl) return;
+    if (pendingText) {
+      flushRender();
+      pendingText = '';
+    } else {
+      removeTrailingEmptyAssistantTextStep(streamEl);
+    }
     const bubble = streamEl.querySelector('.msg-bubble');
     if (!bubble) return;
-    let toolsDiv = bubble.querySelector('.msg-tools');
-    if (!toolsDiv) { toolsDiv = bubble; }
-
+    const stepsDiv = ensureAssistantStepsContainer(bubble);
     const tool = { id: toolUseId, name, input, kind, meta, done };
-
-    const details = createToolCallElement(toolUseId, tool, done);
-
-    // 折叠策略：只维护唯一一个 .tool-group 父节点
-    // 散落的 .tool-call 直接子节点达到3个时，将它们全部移入父节点；之后继续散落，再达3个再移入
-    const FOLD_AT = 3;
-    const looseBefore = Array.from(toolsDiv.children).filter(c => c.classList.contains('tool-call'));
-    if (looseBefore.length >= FOLD_AT) {
-      // 确保存在唯一的 .tool-group
-      let group = toolsDiv.querySelector(':scope > .tool-group');
-      if (!group) {
-        group = document.createElement('details');
-        group.className = 'tool-group';
-        const gs = document.createElement('summary');
-        gs.className = 'tool-group-summary';
-        group.appendChild(gs);
-        const inner = document.createElement('div');
-        inner.className = 'tool-group-inner';
-        group.appendChild(inner);
-        toolsDiv.insertBefore(group, toolsDiv.firstChild);
-        hasGrouped = true;
-      }
-      const inner = group.querySelector('.tool-group-inner');
-      looseBefore.forEach(c => inner.appendChild(c));
-      _refreshGroupSummary(group);
-    }
-    toolsDiv.appendChild(details);
+    stepsDiv.appendChild(createAssistantToolStepElement(tool));
     scrollToBottom();
-  }
-
-  function _refreshGroupSummary(group) {
-    const inner = group.querySelector('.tool-group-inner');
-    const count = inner ? inner.childElementCount : 0;
-    const summary = group.querySelector('.tool-group-summary');
-    if (summary) summary.textContent = `展开 ${count} 个工具调用`;
   }
 
   function updateToolCall(toolUseId, result) {
@@ -4365,6 +4361,140 @@
 
   // --- New Session Modal ---
   let _onCwdSuggestions = null;
+  let _onDirectoryBrowser = null;
+
+  function buildCwdSuggestionMeta(item) {
+    if (!item || typeof item !== 'object') return '';
+    const sourceKinds = Array.isArray(item.sourceKinds) ? item.sourceKinds : [];
+    const parts = [];
+    if (sourceKinds.includes('cc-web')) parts.push('cc-web 已导入');
+    if (sourceKinds.includes('claude-native')) parts.push('Claude 未导入');
+    if (sourceKinds.includes('codex-rollout')) parts.push('Codex 未导入');
+    if (item.importedCount || item.unimportedCount) {
+      const counts = [];
+      if (item.importedCount) counts.push(`${item.importedCount} 个已导入`);
+      if (item.unimportedCount) counts.push(`${item.unimportedCount} 个未导入`);
+      parts.push(counts.join(' / '));
+    }
+    if (item.updatedAt) parts.push(timeAgo(item.updatedAt));
+    if (item.title) parts.push(item.title);
+    return parts.filter(Boolean).join(' · ');
+  }
+
+  function showDirectoryPickerModal(initialPath) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal-panel modal-panel-wide">
+          <div class="modal-header">
+            <span class="modal-title">选择服务器文件夹</span>
+            <button class="modal-close-btn" id="dir-close-btn">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="settings-inline-note" style="margin-bottom:12px">
+              浏览的是运行 CC-Web 这台电脑上的目录。点击子文件夹进入，确认时使用当前目录。
+            </div>
+            <div class="modal-field-row" style="margin-bottom:10px;align-items:center">
+              <input type="text" id="dir-path-input" class="modal-text-input" placeholder="输入目录后回车或点前往">
+              <button class="btn-test" id="dir-go-btn" style="padding:8px 14px;white-space:nowrap">前往</button>
+            </div>
+            <div id="dir-browser-note" class="settings-inline-note" style="margin-bottom:10px;display:none"></div>
+            <div id="dir-roots" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px"></div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">当前目录</div>
+            <div id="dir-current-path" class="settings-inline-note" style="margin-bottom:12px;word-break:break-all"></div>
+            <div id="dir-list" style="display:flex;flex-direction:column;gap:8px"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-btn-secondary" id="dir-cancel-btn">取消</button>
+            <button class="modal-btn-primary" id="dir-confirm-btn">使用当前目录</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      const prevOnDirectoryBrowser = _onDirectoryBrowser;
+      const pathInput = overlay.querySelector('#dir-path-input');
+      const noteEl = overlay.querySelector('#dir-browser-note');
+      const rootsEl = overlay.querySelector('#dir-roots');
+      const currentPathEl = overlay.querySelector('#dir-current-path');
+      const listEl = overlay.querySelector('#dir-list');
+      const confirmBtn = overlay.querySelector('#dir-confirm-btn');
+      let currentPath = '';
+
+      function close(result) {
+        overlay.remove();
+        _onDirectoryBrowser = prevOnDirectoryBrowser;
+        resolve(result || null);
+      }
+
+      function browse(pathValue) {
+        listEl.innerHTML = '<div class="modal-loading" style="padding:20px 0">正在读取目录…</div>';
+        send({ type: 'browse_directories', path: pathValue || '' });
+      }
+
+      function bindBrowserButtons() {
+        rootsEl.querySelectorAll('[data-dir-root]').forEach((button) => {
+          button.addEventListener('click', () => browse(button.dataset.dirRoot));
+        });
+        listEl.querySelectorAll('[data-dir-nav]').forEach((button) => {
+          button.addEventListener('click', () => browse(button.dataset.dirNav));
+        });
+      }
+
+      _onDirectoryBrowser = (payload) => {
+        currentPath = payload.currentPath || '';
+        pathInput.value = currentPath;
+        currentPathEl.textContent = currentPath || '未选择';
+        const note = payload.error
+          ? payload.error
+          : (payload.truncated ? '子目录较多，仅显示前 200 个。' : '');
+        noteEl.style.display = note ? '' : 'none';
+        noteEl.textContent = note;
+        rootsEl.innerHTML = (payload.roots || []).map((root) => `
+          <button class="btn-test" data-dir-root="${escapeHtml(root.path)}" style="padding:6px 10px">
+            ${escapeHtml(root.label || root.path)}
+          </button>
+        `).join('');
+        const rows = [];
+        if (payload.parentPath) {
+          rows.push(`
+            <button class="btn-test" data-dir-nav="${escapeHtml(payload.parentPath)}" style="display:flex;align-items:center;gap:8px;padding:10px 12px;justify-content:flex-start">
+              <span>↑</span>
+              <span>上一级</span>
+            </button>
+          `);
+        }
+        if (Array.isArray(payload.entries) && payload.entries.length > 0) {
+          rows.push(...payload.entries.map((entry) => `
+            <button class="btn-test" data-dir-nav="${escapeHtml(entry.path)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;justify-content:flex-start;text-align:left">
+              <span style="flex-shrink:0">📁</span>
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(entry.name)}</span>
+            </button>
+          `));
+        } else {
+          rows.push('<div class="modal-empty" style="padding:20px 0">当前目录下没有子文件夹</div>');
+        }
+        listEl.innerHTML = rows.join('');
+        confirmBtn.disabled = !currentPath;
+        bindBrowserButtons();
+      };
+
+      overlay.querySelector('#dir-close-btn').addEventListener('click', () => close(null));
+      overlay.querySelector('#dir-cancel-btn').addEventListener('click', () => close(null));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+      overlay.querySelector('#dir-go-btn').addEventListener('click', () => browse(pathInput.value.trim()));
+      pathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          browse(pathInput.value.trim());
+        }
+      });
+      confirmBtn.addEventListener('click', () => close(currentPath || pathInput.value.trim()));
+
+      browse(initialPath || '');
+    });
+  }
 
   function showNewSessionModal() {
     const targetAgent = currentAgent;
@@ -4374,7 +4504,7 @@
     overlay.id = 'new-session-overlay';
 
     overlay.innerHTML = `
-      <div class="modal-panel">
+      <div class="modal-panel modal-panel-wide">
         <div class="modal-header">
           <span class="modal-title">新建 ${escapeHtml(targetLabel)} 会话</span>
           <button class="modal-close-btn" id="ns-close-btn">✕</button>
@@ -4422,68 +4552,155 @@
     switchTab('local');
 
     // --- Local task view ---
-    const pinned = getPinnedCwds(targetAgent);
-    const recent = getRecentCwds().filter(p => !pinned.includes(p));
-    const dirs = [...pinned, ...recent].slice(0, 5);
+    let selectedLocalMode = 'manual';
+    let selectedQuickCwd = '';
+    let selectedSuggestedCwd = '';
+    let manualCwd = currentCwd || '';
+    let cwdSuggestionItems = [];
+    let cwdSuggestionsLoading = true;
+    const prevOnCwdSuggestions = _onCwdSuggestions;
 
-    let selectedLocalIndex = 0;
+    function getQuickDirs() {
+      const pinned = getPinnedCwds(targetAgent);
+      const recent = getRecentCwds().filter(p => !pinned.includes(p));
+      return [...pinned, ...recent].slice(0, 5);
+    }
+
+    function syncLocalSelection(quickDirs, historyItems) {
+      if (selectedLocalMode === 'quick') {
+        if (!quickDirs.includes(selectedQuickCwd)) {
+          selectedQuickCwd = quickDirs[0] || '';
+          if (!selectedQuickCwd) selectedLocalMode = historyItems.length ? 'history' : 'manual';
+        }
+      } else if (selectedLocalMode === 'history') {
+        if (!historyItems.some((item) => item.path === selectedSuggestedCwd)) {
+          selectedSuggestedCwd = historyItems[0]?.path || '';
+          if (!selectedSuggestedCwd) selectedLocalMode = quickDirs.length ? 'quick' : 'manual';
+        }
+      }
+
+      if (selectedLocalMode === 'manual') {
+        if (!manualCwd && quickDirs.length > 0) {
+          selectedLocalMode = 'quick';
+          selectedQuickCwd = quickDirs[0];
+        } else if (!manualCwd && historyItems.length > 0) {
+          selectedLocalMode = 'history';
+          selectedSuggestedCwd = historyItems[0].path;
+        }
+      }
+    }
 
     function renderLocalView() {
       const currentPinned = getPinnedCwds(targetAgent);
-      const currentRecent = getRecentCwds().filter(p => !currentPinned.includes(p));
-      const filledDirs = [...currentPinned, ...currentRecent].slice(0, 4);
-      const maxIndex = filledDirs.length;
-      if (selectedLocalIndex > maxIndex) selectedLocalIndex = maxIndex;
+      const quickDirs = getQuickDirs();
+      const historyItems = cwdSuggestionItems.filter((item) => !quickDirs.includes(item.path));
+      syncLocalSelection(quickDirs, historyItems);
 
       localView.innerHTML = `
-        <div style="display:flex;flex-direction:column;gap:6px">
-          ${filledDirs.map((dir, i) => {
-            const isPinned = currentPinned.includes(dir);
-            const isSelected = selectedLocalIndex === i;
-            return `
-              <div class="ns-cwd-row" data-local-row="${i}" style="display:flex;gap:6px;align-items:center;padding:4px 6px;border:1px solid ${isSelected ? 'var(--accent)' : 'transparent'};border-radius:8px;background:${isSelected ? 'var(--accent-dim,rgba(100,150,255,0.08))' : 'transparent'};cursor:pointer">
-                <input type="radio" name="ns-local-cwd" class="ns-cwd-radio" data-local-radio="${i}" ${isSelected ? 'checked' : ''}>
-                <input type="text" class="modal-text-input ns-cwd-item" value="${escapeHtml(dir)}" data-idx="${i}" style="flex:1;${isPinned ? '' : 'opacity:0.6'}">
-                <button class="btn-test ns-pin-btn" data-idx="${i}" data-cwd="${escapeHtml(dir)}" style="padding:2px 6px;font-size:0.9em;${isPinned ? 'color:var(--accent)' : ''}" title="${isPinned ? '取消固定' : '固定'}">${isPinned ? '★' : '☆'}</button>
-                <button class="btn-test ns-del-dir-btn" data-idx="${i}" data-cwd="${escapeHtml(dir)}" style="padding:2px 6px;font-size:0.9em" title="移除">✕</button>
+        <div class="ns-local-layout">
+          ${quickDirs.length > 0 ? `
+            <div>
+              <div class="modal-field-label" style="margin-bottom:6px">常用目录</div>
+              <div class="ns-cwd-list">
+                ${quickDirs.map((dir) => {
+                  const isPinned = currentPinned.includes(dir);
+                  const isSelected = selectedLocalMode === 'quick' && selectedQuickCwd === dir;
+                  return `
+                    <div class="ns-cwd-row ns-cwd-row--quick" data-select-mode="quick" data-cwd="${escapeHtml(dir)}" style="border:1px solid ${isSelected ? 'var(--accent)' : 'var(--border-color)'};background:${isSelected ? 'var(--accent-dim,rgba(100,150,255,0.08))' : 'transparent'}">
+                      <input type="radio" class="ns-cwd-radio" name="ns-local-cwd" ${isSelected ? 'checked' : ''}>
+                      <div class="ns-cwd-content">
+                        <div class="ns-cwd-path">${escapeHtml(dir)}</div>
+                        <div class="ns-cwd-meta">${isPinned ? '已固定目录' : '最近使用'}</div>
+                      </div>
+                      <div class="ns-cwd-actions">
+                        <button class="btn-test ns-pin-btn ns-cwd-action-btn" data-cwd="${escapeHtml(dir)}" style="${isPinned ? 'color:var(--accent)' : ''}" title="${isPinned ? '取消固定' : '固定'}">${isPinned ? '★' : '☆'}</button>
+                        <button class="btn-test ns-del-dir-btn ns-cwd-action-btn" data-cwd="${escapeHtml(dir)}" title="移除">✕</button>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
               </div>
-            `;
-          }).join('')}
-          <div class="ns-cwd-row" data-local-row="${filledDirs.length}" style="display:flex;gap:6px;align-items:center;padding:4px 6px;border:1px solid ${selectedLocalIndex === filledDirs.length ? 'var(--accent)' : 'transparent'};border-radius:8px;background:${selectedLocalIndex === filledDirs.length ? 'var(--accent-dim,rgba(100,150,255,0.08))' : 'transparent'};cursor:pointer">
-            <input type="radio" name="ns-local-cwd" class="ns-cwd-radio" data-local-radio="${filledDirs.length}" ${selectedLocalIndex === filledDirs.length ? 'checked' : ''}>
-            <input type="text" id="ns-cwd-custom" class="modal-text-input" placeholder="输入自定义目录" style="flex:1">
+            </div>
+          ` : ''}
+          <div>
+            <div class="modal-field-label" style="margin-bottom:6px">已有对话目录</div>
+            ${cwdSuggestionsLoading ? `
+              <div class="modal-loading" style="padding:18px 0">正在整理已有会话目录…</div>
+            ` : historyItems.length > 0 ? `
+              <div class="ns-cwd-list ns-cwd-list--scroll">
+                ${historyItems.map((item) => {
+                  const isSelected = selectedLocalMode === 'history' && selectedSuggestedCwd === item.path;
+                  return `
+                    <div class="ns-cwd-row ns-cwd-row--history" data-select-mode="history" data-cwd="${escapeHtml(item.path)}" style="border:1px solid ${isSelected ? 'var(--accent)' : 'var(--border-color)'};background:${isSelected ? 'var(--accent-dim,rgba(100,150,255,0.08))' : 'transparent'}">
+                      <input type="radio" class="ns-cwd-radio" name="ns-local-cwd" ${isSelected ? 'checked' : ''}>
+                      <div class="ns-cwd-content">
+                        <div class="ns-cwd-path">${escapeHtml(item.path)}</div>
+                        <div class="ns-cwd-meta">${escapeHtml(buildCwdSuggestionMeta(item))}</div>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            ` : `
+              <div class="settings-inline-note">还没有可复用的已有会话目录。</div>
+            `}
+          </div>
+          <div>
+            <div class="modal-field-label" style="margin-bottom:6px">手动输入或浏览</div>
+            <div class="ns-cwd-row ns-cwd-row--manual" data-select-mode="manual" style="border:1px solid ${selectedLocalMode === 'manual' ? 'var(--accent)' : 'var(--border-color)'};background:${selectedLocalMode === 'manual' ? 'var(--accent-dim,rgba(100,150,255,0.08))' : 'transparent'}">
+              <input type="radio" class="ns-cwd-radio" name="ns-local-cwd" ${selectedLocalMode === 'manual' ? 'checked' : ''}>
+              <div class="ns-manual-fields">
+                <input type="text" id="ns-cwd-custom" class="modal-text-input" placeholder="输入工作目录" value="${escapeHtml(manualCwd)}">
+                <button class="btn-test ns-browse-dir-btn" id="ns-browse-dir-btn">浏览文件夹</button>
+              </div>
+            </div>
+            <div class="settings-inline-note" style="margin-top:8px">
+              文件夹选择器浏览的是运行 CC-Web 这台电脑上的目录，适合手机远程控制时使用。
+            </div>
           </div>
         </div>
       `;
 
-      localView.querySelectorAll('[data-local-row]').forEach(row => {
+      localView.querySelectorAll('[data-select-mode]').forEach(row => {
         row.addEventListener('click', (e) => {
           if (e.target.closest('.ns-pin-btn') || e.target.closest('.ns-del-dir-btn')) return;
-          selectedLocalIndex = Number(row.dataset.localRow);
+          const mode = row.dataset.selectMode;
+          if (mode === 'quick') {
+            selectedLocalMode = 'quick';
+            selectedQuickCwd = row.dataset.cwd || '';
+          } else if (mode === 'history') {
+            selectedLocalMode = 'history';
+            selectedSuggestedCwd = row.dataset.cwd || '';
+          } else {
+            selectedLocalMode = 'manual';
+          }
           renderLocalView();
         });
       });
 
-      localView.querySelectorAll('.ns-cwd-item, #ns-cwd-custom').forEach(input => {
-        input.addEventListener('focus', () => {
-          const row = input.closest('[data-local-row]');
-          if (!row) return;
-          selectedLocalIndex = Number(row.dataset.localRow);
+      const customInput = localView.querySelector('#ns-cwd-custom');
+      if (customInput) {
+        customInput.addEventListener('focus', () => {
+          if (selectedLocalMode === 'manual') return;
+          selectedLocalMode = 'manual';
           renderLocalView();
-          const freshInput = localView.querySelector(row.dataset.localRow === String(filledDirs.length) ? '#ns-cwd-custom' : `.ns-cwd-item[data-idx="${row.dataset.localRow}"]`);
+          const freshInput = localView.querySelector('#ns-cwd-custom');
           if (freshInput) {
             const val = freshInput.value;
             freshInput.focus();
             if (typeof freshInput.setSelectionRange === 'function') freshInput.setSelectionRange(val.length, val.length);
           }
         });
-      });
+        customInput.addEventListener('input', () => {
+          manualCwd = customInput.value;
+          selectedLocalMode = 'manual';
+        });
+      }
 
       localView.querySelectorAll('.ns-pin-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
-          const rowInput = btn.closest('[data-local-row]')?.querySelector('.ns-cwd-item');
-          const cwd = rowInput?.value?.trim() || btn.dataset.cwd;
+          const cwd = btn.dataset.cwd;
           if (!cwd) return;
           const currentPinned2 = getPinnedCwds(targetAgent);
           if (currentPinned2.includes(cwd)) {
@@ -4491,7 +4708,8 @@
           } else {
             savePinnedCwd(targetAgent, cwd);
           }
-          selectedLocalIndex = Number(btn.dataset.idx || 0);
+          selectedLocalMode = 'quick';
+          selectedQuickCwd = cwd;
           renderLocalView();
         });
       });
@@ -4499,18 +4717,41 @@
       localView.querySelectorAll('.ns-del-dir-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
-          const rowInput = btn.closest('[data-local-row]')?.querySelector('.ns-cwd-item');
-          const cwd = rowInput?.value?.trim() || btn.dataset.cwd;
+          const cwd = btn.dataset.cwd;
           if (!cwd) return;
           removePinnedCwd(targetAgent, cwd);
-          let recents = getRecentCwds().filter(p => p !== cwd);
+          const recents = getRecentCwds().filter(p => p !== cwd);
           try { localStorage.setItem(RECENT_CWD_KEY, JSON.stringify(recents)); } catch {}
-          if (selectedLocalIndex > 0) selectedLocalIndex -= 1;
+          if (selectedQuickCwd === cwd) selectedQuickCwd = '';
           renderLocalView();
         });
       });
+
+      const browseBtn = localView.querySelector('#ns-browse-dir-btn');
+      if (browseBtn) {
+        browseBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const picked = await showDirectoryPickerModal(manualCwd || selectedQuickCwd || selectedSuggestedCwd || currentCwd || '');
+          if (!picked) return;
+          manualCwd = picked;
+          selectedLocalMode = 'manual';
+          renderLocalView();
+          const freshInput = localView.querySelector('#ns-cwd-custom');
+          if (freshInput) freshInput.focus();
+        });
+      }
     }
 
+    _onCwdSuggestions = (payload) => {
+      if (normalizeAgent(payload.agent) !== targetAgent) return;
+      cwdSuggestionsLoading = false;
+      cwdSuggestionItems = Array.isArray(payload.items)
+        ? payload.items
+        : (payload.paths || []).map((dir) => ({ path: dir, importedCount: 0, unimportedCount: 0, sourceKinds: [] }));
+      renderLocalView();
+    };
+
+    send({ type: 'list_cwd_suggestions', agent: targetAgent });
     renderLocalView();
 
     // --- Remote task view ---
@@ -4559,7 +4800,7 @@
 
     function close() {
       overlay.remove();
-      _onCwdSuggestions = null;
+      _onCwdSuggestions = prevOnCwdSuggestions;
       _onDevConfig = prevOnDevConfig;
     }
 
@@ -4569,13 +4810,13 @@
 
     overlay.querySelector('#ns-create-btn').addEventListener('click', () => {
       if (currentTab === 'local') {
-        const customInput = localView.querySelector('#ns-cwd-custom');
-        const editedItems = Array.from(localView.querySelectorAll('.ns-cwd-item')).map(input => input.value.trim());
         let cwd = null;
-        if (selectedLocalIndex === editedItems.length) {
-          cwd = customInput?.value?.trim() || null;
+        if (selectedLocalMode === 'manual') {
+          cwd = localView.querySelector('#ns-cwd-custom')?.value?.trim() || null;
+        } else if (selectedLocalMode === 'history') {
+          cwd = selectedSuggestedCwd || null;
         } else {
-          cwd = editedItems[selectedLocalIndex] || null;
+          cwd = selectedQuickCwd || null;
         }
         if (!cwd) {
           alert('请选择或输入工作目录');
