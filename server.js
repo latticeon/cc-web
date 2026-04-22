@@ -2985,8 +2985,52 @@ function handleMessage(ws, msg, options = {}) {
   const errorFd = fs.openSync(errorPath, 'w');
 
   let proc;
+  let stdinSource = null;
+  let spawnSettled = false;
+  let parentOutputClosed = false;
+  let parentErrorClosed = false;
+  let parentInputClosed = false;
+
+  function closeFdQuietly(fd) {
+    if (typeof fd !== 'number') return;
+    try { fs.closeSync(fd); } catch {}
+  }
+
+  function closeParentStreams() {
+    if (!parentInputClosed && typeof stdinSource === 'number') {
+      closeFdQuietly(stdinSource);
+      parentInputClosed = true;
+    }
+    if (!parentOutputClosed) {
+      closeFdQuietly(outputFd);
+      parentOutputClosed = true;
+    }
+    if (!parentErrorClosed) {
+      closeFdQuietly(errorFd);
+      parentErrorClosed = true;
+    }
+  }
+
+  function handleSpawnFailure(err) {
+    if (spawnSettled) return;
+    spawnSettled = true;
+    closeParentStreams();
+    cleanRunDir(currentSessionId);
+    plog('ERROR', 'process_spawn_fail', {
+      sessionId: currentSessionId.slice(0, 8),
+      agent: getSessionAgent(session),
+      error: err?.message || 'Unknown spawn error',
+    });
+    const agent = getSessionAgent(session);
+    wsSend(ws, {
+      type: 'error',
+      message: formatRuntimeError(agent, err?.message || 'Unknown spawn error', { exitCode: null, signal: null }),
+    });
+    wsSend(ws, { type: 'done', sessionId: currentSessionId, costUsd: null });
+    sendSessionList(ws);
+  }
+
   try {
-    let stdinSource;
     if (useStreamJson) {
       // stream-json requires an open pipe (not a closed file) so Claude doesn't exit on EOF
       stdinSource = 'pipe';
@@ -3000,24 +3044,24 @@ function handleMessage(ws, msg, options = {}) {
       detached: !IS_WIN,
       windowsHide: true,
     });
+    proc.once('error', handleSpawnFailure);
     if (useStreamJson) {
       // Write the stream-json message then close stdin so Claude knows input is done
       proc.stdin.write(fs.readFileSync(inputPath));
       proc.stdin.end();
     } else {
-      fs.closeSync(stdinSource);
+      closeFdQuietly(stdinSource);
+      parentInputClosed = true;
+    }
+    if (!Number.isInteger(proc.pid) || proc.pid <= 0) {
+      return handleSpawnFailure(new Error(`${getSessionAgent(session)} process did not start correctly`));
     }
   } catch (err) {
-    fs.closeSync(outputFd);
-    fs.closeSync(errorFd);
-    cleanRunDir(currentSessionId);
-    plog('ERROR', 'process_spawn_fail', { sessionId: currentSessionId.slice(0, 8), error: err.message });
-    const agent = getSessionAgent(session);
-    return wsSend(ws, { type: 'error', message: formatRuntimeError(agent, err.message, { exitCode: null, signal: null }) });
+    return handleSpawnFailure(err);
   }
 
-  fs.closeSync(outputFd);
-  fs.closeSync(errorFd);
+  closeParentStreams();
+  spawnSettled = true;
 
   fs.writeFileSync(path.join(dir, 'pid'), String(proc.pid));
   proc.unref(); // Process survives Node.js exit
