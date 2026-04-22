@@ -47,6 +47,13 @@
 	    { value: 'gpt-5.2', label: 'GPT-5.2', desc: '通用 OpenAI 兼容模型' },
 	  ];
 
+  const CODEX_THINKING_OPTIONS = [
+    { value: '', label: '默认思考', desc: '不附加 thinking 强度' },
+    { value: 'medium', label: 'medium', desc: '中等 thinking' },
+    { value: 'high', label: 'high', desc: '更强 thinking' },
+    { value: 'xhigh', label: 'xhigh', desc: '最强 thinking' },
+  ];
+
   const MODE_PICKER_OPTIONS = [
     { value: 'yolo', label: 'YOLO', desc: '跳过所有权限检查' },
     { value: 'plan', label: 'Plan', desc: '执行前需确认计划' },
@@ -125,6 +132,8 @@
   const sessionList = $('#session-list');
   const chatTitle = $('#chat-title');
   const chatAgentBtn = $('#chat-agent-btn');
+  const modelPickerBtn = $('#model-picker-btn');
+  const thinkingPickerBtn = $('#thinking-picker-btn');
   const chatAgentMenu = $('#chat-agent-menu');
   const chatRuntimeState = $('#chat-runtime-state');
   const chatCwdRow = $('#chat-cwd-row');
@@ -1097,6 +1106,62 @@
     updateCwdBadge();
   }
 
+  function getCurrentCodexModelState() {
+    const parsed = _splitCodexThinkingModel(currentModel || '');
+    const fallback = DEFAULT_CODEX_MODEL_OPTIONS[0]?.value || 'gpt-5.4';
+    return {
+      base: _isCodexModelAtLeast52(parsed.base) ? parsed.base : fallback,
+      level: parsed.level || '',
+    };
+  }
+
+  function getCodexBaseModelLabel(baseModel) {
+    const base = String(baseModel || '').trim();
+    if (!base) return 'Codex 模型';
+    const preset = DEFAULT_CODEX_MODEL_OPTIONS.find((opt) => opt.value === base);
+    return preset?.label || base;
+  }
+
+  function getThinkingLevelLabel(level) {
+    const normalized = String(level || '').trim().toLowerCase();
+    return normalized || '默认思考';
+  }
+
+  function updateModelControls() {
+    if (!modelPickerBtn || !thinkingPickerBtn) return;
+    const hasSession = !!currentSessionId;
+
+    if (currentAgent === 'codex') {
+      const codexState = getCurrentCodexModelState();
+      modelPickerBtn.hidden = false;
+      modelPickerBtn.disabled = !hasSession;
+      modelPickerBtn.textContent = getCodexBaseModelLabel(codexState.base);
+      modelPickerBtn.title = hasSession
+        ? `当前 Codex 模型: ${codexState.base}`
+        : '请先打开或创建一个 Codex 会话';
+
+      thinkingPickerBtn.hidden = false;
+      thinkingPickerBtn.disabled = !hasSession;
+      thinkingPickerBtn.textContent = getThinkingLevelLabel(codexState.level);
+      thinkingPickerBtn.title = hasSession
+        ? `当前 Thinking 强度: ${codexState.level || '默认'}`
+        : '请先打开或创建一个 Codex 会话';
+      return;
+    }
+
+    const claudeLabel = MODEL_OPTIONS.find((opt) => opt.value === currentModel)?.label
+      || currentModel
+      || '模型';
+    modelPickerBtn.hidden = false;
+    modelPickerBtn.disabled = !hasSession;
+    modelPickerBtn.textContent = claudeLabel;
+    modelPickerBtn.title = hasSession
+      ? `当前 Claude 模型: ${claudeLabel}`
+      : '请先打开或创建一个 Claude 会话';
+    thinkingPickerBtn.hidden = true;
+    thinkingPickerBtn.disabled = true;
+  }
+
   function updateAgentScopedUI() {
     if (chatAgentBtn) {
       chatAgentBtn.textContent = AGENT_LABELS[currentAgent];
@@ -1112,6 +1177,7 @@
     if (importSessionBtn) {
       importSessionBtn.textContent = currentAgent === 'codex' ? '导入本地 Codex 会话' : '导入本地 Claude 会话';
     }
+    updateModelControls();
   }
 
   function setCurrentAgent(agent) {
@@ -1156,6 +1222,7 @@
     setStatsDisplay(null);
     renderPendingAttachments();
     highlightActiveSession();
+    updateModelControls();
   }
 
   function applySessionSnapshot(snapshot, options = {}) {
@@ -1183,6 +1250,7 @@
       localStorage.setItem(getAgentModeStorageKey(currentAgent), currentMode);
     }
     currentModel = snapshot.model || '';
+    updateModelControls();
     if (!preserveStreaming) {
       renderMessages(snapshot.messages || [], { immediate: !!options.immediate });
     }
@@ -1637,6 +1705,7 @@
             updateCachedSession(currentSessionId, (snapshot) => { snapshot.model = msg.model; });
           }
         }
+        updateModelControls();
         break;
 
       case 'resume_generating':
@@ -2942,13 +3011,7 @@
 	      const baseOptions = getCodexBaseModelOptions();
 	      showOptionPicker('选择 Codex 模型', baseOptions, current.base || '', (baseValue) => {
 	        const base = String(baseValue || '').trim();
-	        const thinkingOptions = [
-	          { value: '', label: '无 (默认)', desc: '不附加 (medium/high/xhigh) 后缀' },
-	          { value: 'medium', label: 'medium', desc: '中等 thinking' },
-	          { value: 'high', label: 'high', desc: '更强 thinking' },
-	          { value: 'xhigh', label: 'xhigh', desc: '最强 thinking' },
-	        ];
-	        showOptionPicker('选择 Thinking 强度', thinkingOptions, current.level || '', (lvl) => {
+	        showOptionPicker('选择 Thinking 强度', CODEX_THINKING_OPTIONS, current.level || '', (lvl) => {
 	          const level = String(lvl || '').trim().toLowerCase();
 	          const full = level ? `${base}(${level})` : base;
 	          send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
@@ -2961,7 +3024,7 @@
     });
   }
 
-  function showModePicker() {
+	  function showModePicker() {
     showOptionPicker('选择权限模式', MODE_PICKER_OPTIONS, currentMode, (value) => {
       currentMode = value;
       modeSelect.value = currentMode;
@@ -2969,6 +3032,27 @@
       if (currentSessionId) {
         send({ type: 'set_mode', sessionId: currentSessionId, mode: currentMode });
       }
+    });
+  }
+
+  function showCodexModelControlPicker() {
+    if (currentAgent !== 'codex' || !currentSessionId) return;
+    const current = getCurrentCodexModelState();
+    const baseOptions = getCodexBaseModelOptions();
+    showOptionPicker('选择 Codex 模型', baseOptions, current.base, (baseValue) => {
+      const base = String(baseValue || '').trim();
+      const full = current.level ? `${base}(${current.level})` : base;
+      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
+    });
+  }
+
+  function showCodexThinkingPicker() {
+    if (currentAgent !== 'codex' || !currentSessionId) return;
+    const current = getCurrentCodexModelState();
+    showOptionPicker('选择 Thinking 强度', CODEX_THINKING_OPTIONS, current.level, (lvl) => {
+      const level = String(lvl || '').trim().toLowerCase();
+      const full = level ? `${current.base}(${level})` : current.base;
+      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
     });
   }
 
@@ -3071,6 +3155,24 @@
         if (targetAgent === currentAgent) return;
         syncViewForAgent(targetAgent, { preserveCurrent: false, loadLast: true });
       });
+    });
+  }
+
+  if (modelPickerBtn) {
+    modelPickerBtn.addEventListener('click', () => {
+      if (!currentSessionId) return;
+      if (currentAgent === 'codex') {
+        showCodexModelControlPicker();
+        return;
+      }
+      showModelPicker();
+    });
+  }
+
+  if (thinkingPickerBtn) {
+    thinkingPickerBtn.addEventListener('click', () => {
+      if (!currentSessionId || currentAgent !== 'codex') return;
+      showCodexThinkingPicker();
     });
   }
 
