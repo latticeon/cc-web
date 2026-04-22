@@ -1165,6 +1165,8 @@ function sendSessionList(ws) {
         sessions.push({
           id: s.id,
           title: s.title || 'Untitled',
+          cwd: s.cwd || '',
+          remoteCwd: s.remoteCwd || '',
           updated: s.updated,
           hasUnread: !!s.hasUnread,
           agent: getSessionAgent(s),

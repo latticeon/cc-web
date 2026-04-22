@@ -1047,6 +1047,32 @@
     return sessions.filter((s) => normalizeAgent(s.agent) === currentAgent);
   }
 
+  function getPathLeaf(pathValue) {
+    const raw = String(pathValue || '').trim();
+    if (!raw) return '';
+    const normalized = raw.replace(/[\\/]+$/, '');
+    if (!normalized) return raw;
+    const parts = normalized.split(/[\\/]+/).filter(Boolean);
+    return parts[parts.length - 1] || normalized;
+  }
+
+  function getSessionDirectoryMeta(session) {
+    const remoteCwd = String(session?.remoteCwd || '').trim();
+    if (remoteCwd) {
+      const leaf = getPathLeaf(remoteCwd) || remoteCwd;
+      return {
+        text: `SSH · ${leaf}`,
+        title: `远端目录: ${remoteCwd}`,
+      };
+    }
+    const cwd = String(session?.cwd || '').trim();
+    if (!cwd) return null;
+    return {
+      text: getPathLeaf(cwd) || cwd,
+      title: cwd,
+    };
+  }
+
   function updateCwdBadge() {
     if (!chatCwd) return;
     if (currentCwd) {
@@ -2541,13 +2567,17 @@
     }
 
     for (const s of visibleSessions) {
+      const directoryMeta = getSessionDirectoryMeta(s);
       const item = document.createElement('div');
       item.className = `session-item${s.id === currentSessionId ? ' active' : ''}`;
       item.dataset.id = s.id;
       item.innerHTML = `
         <div class="session-item-main">
-          <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
-          ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
+          <div class="session-item-title-row">
+            <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
+            ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
+          </div>
+          ${directoryMeta ? `<div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">${escapeHtml(directoryMeta.text)}</div>` : ''}
         </div>
         ${s.hasUnread ? '<span class="session-unread-dot"></span>' : ''}
         <span class="session-item-time">${timeAgo(s.updated)}</span>
