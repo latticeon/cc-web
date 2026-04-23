@@ -5,6 +5,14 @@ const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 const { createAgentRuntime } = require('./lib/agent-runtime');
+const {
+  DEFAULT_AGENT,
+  getAgentConfig,
+  getAgentIds,
+  getPublicAgentCatalog,
+  getRuntimeSessionField,
+  normalizeAgent,
+} = require('./lib/agent-registry');
 const { createCodexRolloutStore } = require('./lib/codex-rollouts');
 
 // Load .env
@@ -237,8 +245,8 @@ function buildSummaryPrompt(sessionTitle, lastUserMsg, fullText, isError, errorD
 
 async function buildNotifyContent(entry, session, completionError, contextLimitExceeded) {
   const title = session?.title || 'Untitled';
-  const agent = entry.agent || 'claude';
-  const agentLabel = agent === 'codex' ? 'Codex' : 'Claude';
+  const agent = normalizeAgent(entry.agent);
+  const agentLabel = getAgentLabel(agent);
   const hasTools = (entry.toolCalls || []).length > 0;
 
   // Determine notify title
@@ -536,11 +544,27 @@ let MODEL_MAP = {
   haiku: 'claude-haiku-4-5-20251001',
 };
 
-const VALID_AGENTS = new Set(['claude', 'codex']);
+function getAgentLabel(agent) {
+  return getAgentConfig(agent).label || getAgentConfig(DEFAULT_AGENT).label || 'Agent';
+}
 
-// Codex CLI has its own default model if --model is omitted. We override it for new Codex sessions
-// to keep cc-web behavior stable and predictable.
-const DEFAULT_CODEX_MODEL = 'gpt-5.4';
+function resolveAgentDefaultSessionModel(agent) {
+  const spec = getAgentConfig(agent).defaults?.defaultSessionModel || null;
+  if (!spec) return null;
+  if (spec.source === 'model-map') {
+    return MODEL_MAP[spec.key] || null;
+  }
+  if (spec.source === 'literal') {
+    return spec.value || null;
+  }
+  return null;
+}
+
+function resolveAgentDefaultCwd(agent) {
+  const spec = getAgentConfig(agent).defaults?.localTaskCwd || null;
+  if (spec?.source === 'home') return getHomeDir();
+  return null;
+}
 
 // === Model Config ===
 const DEFAULT_MODEL_CONFIG = {
@@ -1014,15 +1038,13 @@ function jsonResponse(res, statusCode, payload) {
 const INITIAL_HISTORY_COUNT = 12;
 const HISTORY_CHUNK_SIZE = 24;
 
-function normalizeAgent(agent) {
-  return VALID_AGENTS.has(agent) ? agent : 'claude';
-}
-
 function normalizeSession(session) {
   if (!session || typeof session !== 'object') return session;
   session.agent = normalizeAgent(session.agent);
-  if (!Object.prototype.hasOwnProperty.call(session, 'claudeSessionId')) session.claudeSessionId = null;
-  if (!Object.prototype.hasOwnProperty.call(session, 'codexThreadId')) session.codexThreadId = null;
+  getAgentIds().forEach((agentId) => {
+    const runtimeField = getRuntimeSessionField(agentId);
+    if (!Object.prototype.hasOwnProperty.call(session, runtimeField)) session[runtimeField] = null;
+  });
   if (!Object.prototype.hasOwnProperty.call(session, 'totalCost')) session.totalCost = 0;
   if (!Object.prototype.hasOwnProperty.call(session, 'totalUsage') || !session.totalUsage) {
     session.totalUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
@@ -1068,18 +1090,14 @@ function isClaudeSession(session) {
 
 function getRuntimeSessionId(session) {
   if (!session) return null;
-  return getSessionAgent(session) === 'codex'
-    ? (session.codexThreadId || null)
-    : (session.claudeSessionId || null);
+  const runtimeField = getRuntimeSessionField(getSessionAgent(session));
+  return session[runtimeField] || null;
 }
 
 function setRuntimeSessionId(session, runtimeId) {
   if (!session) return;
-  if (getSessionAgent(session) === 'codex') {
-    session.codexThreadId = runtimeId || null;
-  } else {
-    session.claudeSessionId = runtimeId || null;
-  }
+  const runtimeField = getRuntimeSessionField(getSessionAgent(session));
+  session[runtimeField] = runtimeId || null;
 }
 
 function clearRuntimeSessionId(session) {
@@ -1614,6 +1632,15 @@ function recoverProcesses() {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
+  if (req.method === 'GET' && url.pathname === '/api/agents.js') {
+    const payload = `window.CC_AGENT_CATALOG = ${JSON.stringify(getPublicAgentCatalog(), null, 2)};\n`;
+    res.writeHead(200, {
+      'Content-Type': 'text/javascript; charset=utf-8',
+      'Cache-Control': 'no-cache',
+    });
+    return res.end(payload);
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/attachments') {
     const token = extractBearerToken(req);
     if (!token || !activeTokens.has(token)) {
@@ -1856,6 +1883,12 @@ wss.on('connection', (ws, req) => {
         break;
       case 'save_dev_config':
         handleSaveDevConfig(ws, msg);
+        break;
+      case 'list_agent_import_sessions':
+        handleListAgentImportSessions(ws, msg);
+        break;
+      case 'import_agent_session':
+        handleImportAgentSession(ws, msg);
         break;
       case 'list_native_sessions':
         handleListNativeSessions(ws);
@@ -2500,7 +2533,7 @@ function handleNewSession(ws, msg) {
   const sshHostId = String(msg?.sshHostId || '').trim();
   const remoteCwd = String(msg?.remoteCwd || '').trim();
 
-  let resolvedCwd = cwd || (agent === 'claude' ? (process.env.HOME || process.env.USERPROFILE || process.cwd()) : null);
+  let resolvedCwd = cwd || resolveAgentDefaultCwd(agent);
   let hostInfo = null;
 
   // Remote task: create host-specific directory and inject host info
@@ -2515,15 +2548,15 @@ function handleNewSession(ws, msg) {
   }
 
   const id = crypto.randomUUID();
+  const runtimeField = getRuntimeSessionField(agent);
   const session = {
     id,
     title: 'New Chat',
     created: new Date().toISOString(),
     updated: new Date().toISOString(),
     agent,
-    claudeSessionId: null,
-    codexThreadId: null,
-    model: agent === 'codex' ? DEFAULT_CODEX_MODEL : MODEL_MAP.opus,
+    [runtimeField]: null,
+    model: resolveAgentDefaultSessionModel(agent),
     permissionMode: requestedMode,
     totalCost: 0,
     totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
@@ -2865,23 +2898,23 @@ function handleMessage(ws, msg, options = {}) {
   if (!session) {
     const id = crypto.randomUUID();
     const agent = normalizeAgent(msg.agent);
-    const resolvedCwd = agent === 'claude' ? (process.env.HOME || process.env.USERPROFILE || process.cwd()) : null;
-	    session = {
-	      id,
-	      title: derivedTitle,
-	      created: new Date().toISOString(),
-	      updated: new Date().toISOString(),
-	      agent,
-	      claudeSessionId: null,
-	      codexThreadId: null,
-	      model: agent === 'codex' ? DEFAULT_CODEX_MODEL : null,
-	      permissionMode: mode || 'yolo',
-	      totalCost: 0,
-	      totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
-	      messages: [],
-	      cwd: resolvedCwd,
-	    };
-	  }
+    const resolvedCwd = resolveAgentDefaultCwd(agent);
+    const runtimeField = getRuntimeSessionField(agent);
+    session = {
+      id,
+      title: derivedTitle,
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+      agent,
+      [runtimeField]: null,
+      model: resolveAgentDefaultSessionModel(agent),
+      permissionMode: mode || 'yolo',
+      totalCost: 0,
+      totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+      messages: [],
+      cwd: resolvedCwd,
+    };
+  }
   normalizeSession(session);
 
   if (normalizedText.startsWith('/') && resolvedAttachments.length > 0) {
@@ -2941,9 +2974,7 @@ function handleMessage(ws, msg, options = {}) {
   }
   sendSessionList(ws);
 
-  const spawnSpec = isClaudeSession(session)
-    ? buildClaudeSpawnSpec(session, { attachments: resolvedAttachments })
-    : buildCodexSpawnSpec(session, { attachments: resolvedAttachments });
+  const spawnSpec = buildSpawnSpec(session, { attachments: resolvedAttachments });
   if (spawnSpec?.error) {
     return wsSend(ws, { type: 'error', message: spawnSpec.error });
   }
@@ -3148,10 +3179,7 @@ function sanitizeToolInput(toolName, input) {
 }
 
 const {
-  buildClaudeSpawnSpec,
-  buildCodexSpawnSpec,
-  processClaudeEvent,
-  processCodexEvent,
+  buildSpawnSpec,
   processRuntimeEvent,
 } = createAgentRuntime({
   processEnv: process.env,
@@ -3347,7 +3375,11 @@ function getImportedSessionIds() {
   return imported;
 }
 
-function handleListNativeSessions(ws) {
+function sendAgentImportSessions(ws, agent, data) {
+  wsSend(ws, { type: 'agent_import_sessions', agent: normalizeAgent(agent), data });
+}
+
+function handleListNativeSessions(ws, options = {}) {
   const groups = [];
   try {
     const imported = getImportedSessionIds();
@@ -3401,7 +3433,11 @@ function handleListNativeSessions(ws) {
       }
     }
   } catch {}
-  wsSend(ws, { type: 'native_sessions', groups });
+  if (options.unified) {
+    sendAgentImportSessions(ws, 'claude', groups);
+  } else {
+    wsSend(ws, { type: 'native_sessions', groups });
+  }
 }
 
 function handleImportNativeSession(ws, msg) {
@@ -3451,14 +3487,14 @@ function handleImportNativeSession(ws, msg) {
   }
 
   const id = existingSession ? existingSession.id : crypto.randomUUID();
+  const runtimeField = getRuntimeSessionField('claude');
   const session = {
     id,
     title,
     created: existingSession?.created || new Date().toISOString(),
     updated: new Date().toISOString(),
     agent: 'claude',
-    claudeSessionId: sessionId,
-    codexThreadId: null,
+    [runtimeField]: sessionId,
     importedFrom: projectDir,
     model: existingSession?.model || null,
     permissionMode: existingSession?.permissionMode || 'yolo',
@@ -3491,7 +3527,7 @@ function handleImportNativeSession(ws, msg) {
   sendSessionList(ws);
 }
 
-function handleListCodexSessions(ws) {
+function handleListCodexSessions(ws, options = {}) {
   const imported = getImportedCodexThreadIds();
   const items = [];
   const seen = new Set();
@@ -3512,7 +3548,11 @@ function handleListCodexSessions(ws) {
       alreadyImported: imported.has(parsed.meta.threadId),
     });
   }
-  wsSend(ws, { type: 'codex_sessions', sessions: items });
+  if (options.unified) {
+    sendAgentImportSessions(ws, 'codex', items);
+  } else {
+    wsSend(ws, { type: 'codex_sessions', sessions: items });
+  }
 }
 
 function handleImportCodexSession(ws, msg) {
@@ -3551,14 +3591,14 @@ function handleImportCodexSession(ws, msg) {
   } catch {}
 
   const id = existingSession ? existingSession.id : crypto.randomUUID();
+  const runtimeField = getRuntimeSessionField('codex');
   const session = {
     id,
     title: parsed.meta.title || existingSession?.title || threadId.slice(0, 20),
     created: existingSession?.created || new Date().toISOString(),
     updated: new Date().toISOString(),
     agent: 'codex',
-    claudeSessionId: null,
-    codexThreadId: threadId,
+    [runtimeField]: threadId,
     importedFrom: 'codex',
     importedRolloutPath: parsed.filePath,
     model: existingSession?.model || null,
@@ -3591,6 +3631,20 @@ function handleImportCodexSession(ws, msg) {
     remoteCwd: session.remoteCwd || '',
   });
   sendSessionList(ws);
+}
+
+function handleListAgentImportSessions(ws, msg) {
+  const agent = normalizeAgent(msg?.agent);
+  if (agent === 'codex') return handleListCodexSessions(ws, { unified: true });
+  if (agent === 'claude') return handleListNativeSessions(ws, { unified: true });
+  wsSend(ws, { type: 'error', message: `当前 agent 暂不支持导入: ${agent}` });
+}
+
+function handleImportAgentSession(ws, msg) {
+  const agent = normalizeAgent(msg?.agent);
+  if (agent === 'codex') return handleImportCodexSession(ws, msg);
+  if (agent === 'claude') return handleImportNativeSession(ws, msg);
+  wsSend(ws, { type: 'error', message: `当前 agent 暂不支持导入: ${agent}` });
 }
 
 function addCwdSuggestion(map, cwd, meta = {}) {

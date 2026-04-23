@@ -23,36 +23,126 @@
     yolo: 'YOLO',
   };
 
-  const AGENT_LABELS = {
-    claude: 'Claude',
-    codex: 'Codex',
-  };
+  const FALLBACK_AGENT_CATALOG = [
+    {
+      id: 'claude',
+      label: 'Claude',
+      avatar: '/claude.png',
+      default: true,
+      defaults: { initialModel: 'opus' },
+      modelControl: {
+        kind: 'preset',
+        title: '选择模型',
+        options: [
+          { value: 'opus', label: 'Opus', desc: '最强大，1M 上下文' },
+          { value: 'sonnet', label: 'Sonnet', desc: '平衡性能，1M 上下文' },
+          { value: 'haiku', label: 'Haiku', desc: '最快速，适合简单任务' },
+        ],
+      },
+      import: {
+        enabled: true,
+        requestType: 'list_agent_import_sessions',
+        actionType: 'import_agent_session',
+        payloadFields: ['sessionId', 'projectDir'],
+        listStyle: 'grouped',
+        buttonLabel: '导入本地 Claude 会话',
+        modalTitle: '导入本地 Claude 会话',
+        contextTitle: '从 Claude 原生历史导入',
+        contextCopy: '读取 ~/.claude/projects/ 下的会话文件，恢复对话文本与工具调用，并保留 Claude 侧续接上下文。',
+        loadingText: '正在加载 Claude 本地历史…',
+        emptyText: '未找到本地 Claude 会话',
+        reimportConfirm: '已导入过此会话，重新导入将覆盖已有内容。确认继续？',
+        importConfirm: '由于 cc-web 与本地 CLI 的逻辑不同，导入会话需要解析后方可展示，导入后将覆盖已有内容。确认继续？',
+      },
+    },
+    {
+      id: 'codex',
+      label: 'Codex',
+      avatar: '/codex.png',
+      default: false,
+      defaults: { initialModel: '' },
+      modelControl: {
+        kind: 'reasoning',
+        title: '选择 Codex 模型',
+        secondaryTitle: '选择 Thinking 强度',
+        baseOptions: [
+          { value: 'gpt-5.4', label: 'GPT-5.4', desc: '当前主力 Codex 模型' },
+          { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: '偏工程执行场景' },
+          { value: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', desc: '兼容旧路由与旧配置' },
+          { value: 'gpt-5.2', label: 'GPT-5.2', desc: '通用 OpenAI 兼容模型' },
+        ],
+        thinkingOptions: [
+          { value: '', label: '默认思考', desc: '不附加 thinking 强度' },
+          { value: 'medium', label: 'medium', desc: '中等 thinking' },
+          { value: 'high', label: 'high', desc: '更强 thinking' },
+          { value: 'xhigh', label: 'xhigh', desc: '最强 thinking' },
+        ],
+      },
+      import: {
+        enabled: true,
+        requestType: 'list_agent_import_sessions',
+        actionType: 'import_agent_session',
+        payloadFields: ['threadId', 'rolloutPath'],
+        listStyle: 'flat',
+        buttonLabel: '导入本地 Codex 会话',
+        modalTitle: '导入本地 Codex 会话',
+        contextTitle: '从 Codex rollout 历史导入',
+        contextCopy: '读取 ~/.codex/sessions/ 下的 rollout 文件，恢复用户消息、助手输出、函数调用和 token 统计。',
+        loadingText: '正在加载 Codex 本地历史…',
+        emptyText: '未找到本地 Codex 会话',
+        reimportConfirm: '已导入过此 Codex 会话，重新导入将覆盖已有内容。确认继续？',
+        importConfirm: '将解析本地 Codex rollout 历史并导入当前 Web 视图。确认继续？',
+      },
+    },
+  ];
 
-  const DEFAULT_AGENT = 'claude';
+  function normalizeAgentCatalog(rawCatalog) {
+    const source = Array.isArray(rawCatalog) && rawCatalog.length > 0 ? rawCatalog : FALLBACK_AGENT_CATALOG;
+    const seen = new Set();
+    const normalized = source
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const id = String(item.id || '').trim();
+        const label = String(item.label || '').trim();
+        if (!id || !label || seen.has(id)) return null;
+        seen.add(id);
+        return {
+          id,
+          label,
+          avatar: String(item.avatar || ''),
+          default: !!item.default,
+          defaults: {
+            initialModel: String(item.defaults?.initialModel || ''),
+          },
+          modelControl: item.modelControl ? JSON.parse(JSON.stringify(item.modelControl)) : null,
+          import: item.import ? JSON.parse(JSON.stringify(item.import)) : null,
+        };
+      })
+      .filter(Boolean);
+    return normalized.length > 0 ? normalized : JSON.parse(JSON.stringify(FALLBACK_AGENT_CATALOG));
+  }
+
+  const AGENT_CATALOG = normalizeAgentCatalog(window.CC_AGENT_CATALOG);
+  const AGENT_MAP = Object.fromEntries(AGENT_CATALOG.map((agent) => [agent.id, agent]));
+  const AGENT_LABELS = Object.fromEntries(AGENT_CATALOG.map((agent) => [agent.id, agent.label]));
+  const DEFAULT_AGENT = AGENT_CATALOG.find((agent) => agent.default)?.id || AGENT_CATALOG[0]?.id || 'claude';
   const SESSION_CACHE_LIMIT = 4;
   const SESSION_CACHE_MAX_WEIGHT = 1_500_000;
   const SIDEBAR_SWIPE_TRIGGER = 72;
   const SIDEBAR_SWIPE_MAX_VERTICAL_DRIFT = 42;
 
-  const MODEL_OPTIONS = [
-    { value: 'opus', label: 'Opus', desc: '最强大，1M 上下文' },
-    { value: 'sonnet', label: 'Sonnet', desc: '平衡性能，1M 上下文' },
-    { value: 'haiku', label: 'Haiku', desc: '最快速，适合简单任务' },
-  ];
+  function getAgentDefinition(agent) {
+    return AGENT_MAP[normalizeAgent(agent)] || AGENT_MAP[DEFAULT_AGENT] || AGENT_CATALOG[0];
+  }
 
-	  const DEFAULT_CODEX_MODEL_OPTIONS = [
-	    { value: 'gpt-5.4', label: 'GPT-5.4', desc: '当前主力 Codex 模型' },
-	    { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: '偏工程执行场景' },
-	    { value: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', desc: '兼容旧路由与旧配置' },
-	    { value: 'gpt-5.2', label: 'GPT-5.2', desc: '通用 OpenAI 兼容模型' },
-	  ];
+  function getAgentModelControl(agent) {
+    return getAgentDefinition(agent)?.modelControl || null;
+  }
 
-  const CODEX_THINKING_OPTIONS = [
-    { value: '', label: '默认思考', desc: '不附加 thinking 强度' },
-    { value: 'medium', label: 'medium', desc: '中等 thinking' },
-    { value: 'high', label: 'high', desc: '更强 thinking' },
-    { value: 'xhigh', label: 'xhigh', desc: '最强 thinking' },
-  ];
+  function getAgentImportSpec(agent) {
+    const spec = getAgentDefinition(agent)?.import || null;
+    return spec?.enabled ? spec : null;
+  }
 
   const MODE_PICKER_OPTIONS = [
     { value: 'yolo', label: 'YOLO', desc: '跳过所有权限检查' },
@@ -95,8 +185,8 @@
   let activeToolCalls = new Map();
   let cmdMenuIndex = -1;
   let currentMode = 'yolo';
-  let currentModel = 'opus';
   let currentAgent = AGENT_LABELS[localStorage.getItem('cc-web-agent')] ? localStorage.getItem('cc-web-agent') : DEFAULT_AGENT;
+  let currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
   let currentTheme = (document.documentElement.dataset.theme || localStorage.getItem('cc-web-theme') || 'washi');
   let codexConfigCache = null;
   let loadedHistorySessionId = null;
@@ -159,12 +249,29 @@
   window.addEventListener('orientationchange', () => setTimeout(setVH, 100));
 
   function buildWelcomeMarkup(agent) {
-    const label = AGENT_LABELS[agent] || AGENT_LABELS.claude;
+    const label = getAgentDefinition(agent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
     return `<div class="welcome-msg"><div class="welcome-icon">✿</div><h3>欢迎使用 CC-Web</h3><p>开始与 ${label} 对话</p></div>`;
   }
 
   function normalizeAgent(agent) {
-    return AGENT_LABELS[agent] ? agent : DEFAULT_AGENT;
+    return AGENT_MAP[String(agent || '').trim()] ? String(agent || '').trim() : DEFAULT_AGENT;
+  }
+
+  function getAgentAvatarHtml(agent) {
+    const spec = getAgentDefinition(agent);
+    if (spec?.avatar) {
+      return `<img src="${escapeHtml(spec.avatar)}" width="24" height="24" style="display:block;" alt="${escapeHtml(spec.label || 'Agent')}">`;
+    }
+    return escapeHtml((spec?.label || 'A').slice(0, 1).toUpperCase());
+  }
+
+  function renderAgentMenu() {
+    if (!chatAgentMenu) return;
+    chatAgentMenu.innerHTML = AGENT_CATALOG.map((agent) => `
+      <button type="button" class="chat-agent-option${agent.id === currentAgent ? ' active' : ''}" data-agent="${escapeHtml(agent.id)}" aria-pressed="${agent.id === currentAgent ? 'true' : 'false'}">
+        ${escapeHtml(agent.label)}
+      </button>
+    `).join('');
   }
 
   function normalizeTheme(theme) {
@@ -1107,8 +1214,9 @@
   }
 
   function getCurrentCodexModelState() {
+    const modelControl = getAgentModelControl(currentAgent);
     const parsed = _splitCodexThinkingModel(currentModel || '');
-    const fallback = DEFAULT_CODEX_MODEL_OPTIONS[0]?.value || 'gpt-5.4';
+    const fallback = modelControl?.baseOptions?.[0]?.value || 'gpt-5.4';
     return {
       base: _isCodexModelAtLeast52(parsed.base) ? parsed.base : fallback,
       level: parsed.level || '',
@@ -1116,9 +1224,10 @@
   }
 
   function getCodexBaseModelLabel(baseModel) {
+    const modelControl = getAgentModelControl(currentAgent);
     const base = String(baseModel || '').trim();
     if (!base) return 'Codex 模型';
-    const preset = DEFAULT_CODEX_MODEL_OPTIONS.find((opt) => opt.value === base);
+    const preset = (modelControl?.baseOptions || []).find((opt) => opt.value === base);
     return preset?.label || base;
   }
 
@@ -1130,44 +1239,47 @@
   function updateModelControls() {
     if (!modelPickerBtn || !thinkingPickerBtn) return;
     const hasSession = !!currentSessionId;
+    const agentSpec = getAgentDefinition(currentAgent);
+    const modelControl = agentSpec?.modelControl || null;
 
-    if (currentAgent === 'codex') {
+    if (modelControl?.kind === 'reasoning') {
       const codexState = getCurrentCodexModelState();
       modelPickerBtn.hidden = false;
       modelPickerBtn.disabled = !hasSession;
       modelPickerBtn.textContent = getCodexBaseModelLabel(codexState.base);
       modelPickerBtn.title = hasSession
-        ? `当前 Codex 模型: ${codexState.base}`
-        : '请先打开或创建一个 Codex 会话';
+        ? `当前 ${agentSpec.label} 模型: ${codexState.base}`
+        : `请先打开或创建一个 ${agentSpec.label} 会话`;
 
       thinkingPickerBtn.hidden = false;
       thinkingPickerBtn.disabled = !hasSession;
       thinkingPickerBtn.textContent = getThinkingLevelLabel(codexState.level);
       thinkingPickerBtn.title = hasSession
         ? `当前 Thinking 强度: ${codexState.level || '默认'}`
-        : '请先打开或创建一个 Codex 会话';
+        : `请先打开或创建一个 ${agentSpec.label} 会话`;
       return;
     }
 
-    const claudeLabel = MODEL_OPTIONS.find((opt) => opt.value === currentModel)?.label
+    const primaryLabel = (modelControl?.options || []).find((opt) => opt.value === currentModel)?.label
       || currentModel
       || '模型';
     modelPickerBtn.hidden = false;
     modelPickerBtn.disabled = !hasSession;
-    modelPickerBtn.textContent = claudeLabel;
+    modelPickerBtn.textContent = primaryLabel;
     modelPickerBtn.title = hasSession
-      ? `当前 Claude 模型: ${claudeLabel}`
-      : '请先打开或创建一个 Claude 会话';
+      ? `当前 ${agentSpec?.label || 'Agent'} 模型: ${primaryLabel}`
+      : `请先打开或创建一个 ${agentSpec?.label || 'Agent'} 会话`;
     thinkingPickerBtn.hidden = true;
     thinkingPickerBtn.disabled = true;
   }
 
   function updateAgentScopedUI() {
     if (chatAgentBtn) {
-      chatAgentBtn.textContent = AGENT_LABELS[currentAgent];
+      chatAgentBtn.textContent = getAgentDefinition(currentAgent)?.label || currentAgent;
       chatAgentBtn.setAttribute('aria-expanded', chatAgentMenu && !chatAgentMenu.hidden ? 'true' : 'false');
     }
     if (chatAgentMenu) {
+      renderAgentMenu();
       chatAgentMenu.querySelectorAll('.chat-agent-option').forEach((btn) => {
         const active = btn.dataset.agent === currentAgent;
         btn.classList.toggle('active', active);
@@ -1175,7 +1287,11 @@
       });
     }
     if (importSessionBtn) {
-      importSessionBtn.textContent = currentAgent === 'codex' ? '导入本地 Codex 会话' : '导入本地 Claude 会话';
+      const importSpec = getAgentImportSpec(currentAgent);
+      importSessionBtn.hidden = !importSpec;
+      importSessionBtn.textContent = importSpec?.buttonLabel || '导入本地会话';
+      if (!importSpec && !newChatDropdown.hidden) newChatDropdown.hidden = true;
+      if (newChatArrow) newChatArrow.hidden = !importSpec;
     }
     updateModelControls();
   }
@@ -1208,7 +1324,7 @@
     clearSessionLoading();
     setCurrentSessionRunningState(false);
     currentCwd = null;
-    currentModel = currentAgent === 'claude' ? 'opus' : '';
+    currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
     isGenerating = false;
     pendingText = '';
     pendingAttachments = [];
@@ -1385,7 +1501,7 @@
   }
 
   function setStatsDisplay(msg) {
-    if (currentAgent === 'codex' && msg && msg.totalUsage) {
+    if (msg && msg.totalUsage) {
       const usage = msg.totalUsage;
       if ((usage.inputTokens || 0) > 0 || (usage.outputTokens || 0) > 0) {
         const cacheText = usage.cachedInputTokens ? ` · cache ${usage.cachedInputTokens}` : '';
@@ -1418,6 +1534,7 @@
 	  }
 
 	  function getCodexBaseModelOptions() {
+	    const modelControl = getAgentModelControl(currentAgent);
 	    const seen = new Set();
 	    const options = [];
 
@@ -1434,10 +1551,10 @@
 	      addOption(base, label || base, desc);
 	    }
 
-	    DEFAULT_CODEX_MODEL_OPTIONS.forEach((opt) => addBaseOption(opt.value, opt.label, opt.desc));
+	    (modelControl?.baseOptions || []).forEach((opt) => addBaseOption(opt.value, opt.label, opt.desc));
 	    addBaseOption(currentModel, currentModel, '当前会话模型');
 	    sessions
-	      .filter((s) => normalizeAgent(s.agent) === 'codex' && s.id === currentSessionId)
+	      .filter((s) => normalizeAgent(s.agent) === currentAgent && s.id === currentSessionId)
 	      .forEach((s) => addBaseOption(s.model, s.model, '当前会话已保存模型'));
 
 	    return options;
@@ -1812,12 +1929,22 @@
         handlePasswordChanged(msg);
         break;
 
+      case 'agent_import_sessions':
+        if (typeof _onAgentImportSessions === 'function') {
+          _onAgentImportSessions({ agent: msg.agent, data: msg.data });
+        }
+        break;
+
       case 'native_sessions':
-        if (typeof _onNativeSessions === 'function') _onNativeSessions(msg.groups || []);
+        if (typeof _onAgentImportSessions === 'function') {
+          _onAgentImportSessions({ agent: 'claude', data: msg.groups || [] });
+        }
         break;
 
       case 'codex_sessions':
-        if (typeof _onCodexSessions === 'function') _onCodexSessions(msg.sessions || []);
+        if (typeof _onAgentImportSessions === 'function') {
+          _onAgentImportSessions({ agent: 'codex', data: msg.sessions || [] });
+        }
         break;
 
       case 'cwd_suggestions':
@@ -2015,10 +2142,8 @@
     avatar.className = 'msg-avatar';
     if (role === 'user') {
       avatar.textContent = 'U';
-    } else if (currentAgent === 'codex') {
-      avatar.innerHTML = `<img src="/codex.png" width="24" height="24" style="display:block;" alt="Codex">`;
     } else {
-      avatar.innerHTML = `<img src="/claude.png" width="24" height="24" style="display:block;" alt="Claude">`;
+      avatar.innerHTML = getAgentAvatarHtml(currentAgent);
     }
 
     const bubble = document.createElement('div');
@@ -3006,12 +3131,14 @@
   }
 
 	  function showModelPicker() {
-	    if (currentAgent === 'codex') {
+	    const modelControl = getAgentModelControl(currentAgent);
+	    if (!modelControl) return;
+	    if (modelControl.kind === 'reasoning') {
 	      const current = _splitCodexThinkingModel(currentModel || '');
 	      const baseOptions = getCodexBaseModelOptions();
-	      showOptionPicker('选择 Codex 模型', baseOptions, current.base || '', (baseValue) => {
+	      showOptionPicker(modelControl.title || '选择模型', baseOptions, current.base || '', (baseValue) => {
 	        const base = String(baseValue || '').trim();
-	        showOptionPicker('选择 Thinking 强度', CODEX_THINKING_OPTIONS, current.level || '', (lvl) => {
+	        showOptionPicker(modelControl.secondaryTitle || '选择 Thinking 强度', modelControl.thinkingOptions || [], current.level || '', (lvl) => {
 	          const level = String(lvl || '').trim().toLowerCase();
 	          const full = level ? `${base}(${level})` : base;
 	          send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
@@ -3019,7 +3146,7 @@
 	      });
 	      return;
 	    }
-	    showOptionPicker('选择模型', MODEL_OPTIONS, currentModel, (value) => {
+	    showOptionPicker(modelControl.title || '选择模型', modelControl.options || [], currentModel, (value) => {
 	      send({ type: 'message', text: `/model ${value}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
     });
   }
@@ -3036,10 +3163,11 @@
   }
 
   function showCodexModelControlPicker() {
-    if (currentAgent !== 'codex' || !currentSessionId) return;
+    const modelControl = getAgentModelControl(currentAgent);
+    if (modelControl?.kind !== 'reasoning' || !currentSessionId) return;
     const current = getCurrentCodexModelState();
     const baseOptions = getCodexBaseModelOptions();
-    showOptionPicker('选择 Codex 模型', baseOptions, current.base, (baseValue) => {
+    showOptionPicker(modelControl.title || '选择模型', baseOptions, current.base, (baseValue) => {
       const base = String(baseValue || '').trim();
       const full = current.level ? `${base}(${current.level})` : base;
       send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
@@ -3047,9 +3175,10 @@
   }
 
   function showCodexThinkingPicker() {
-    if (currentAgent !== 'codex' || !currentSessionId) return;
+    const modelControl = getAgentModelControl(currentAgent);
+    if (modelControl?.kind !== 'reasoning' || !currentSessionId) return;
     const current = getCurrentCodexModelState();
-    showOptionPicker('选择 Thinking 强度', CODEX_THINKING_OPTIONS, current.level, (lvl) => {
+    showOptionPicker(modelControl.secondaryTitle || '选择 Thinking 强度', modelControl.thinkingOptions || [], current.level, (lvl) => {
       const level = String(lvl || '').trim().toLowerCase();
       const full = level ? `${current.base}(${level})` : current.base;
       send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
@@ -3147,21 +3276,21 @@
       e.stopPropagation();
       toggleAgentMenu();
     });
-    chatAgentMenu.querySelectorAll('.chat-agent-option').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        closeAgentMenu();
-        const targetAgent = normalizeAgent(btn.dataset.agent);
-        if (targetAgent === currentAgent) return;
-        syncViewForAgent(targetAgent, { preserveCurrent: false, loadLast: true });
-      });
+    chatAgentMenu.addEventListener('click', (e) => {
+      const btn = e.target.closest('.chat-agent-option');
+      if (!btn) return;
+      e.stopPropagation();
+      closeAgentMenu();
+      const targetAgent = normalizeAgent(btn.dataset.agent);
+      if (targetAgent === currentAgent) return;
+      syncViewForAgent(targetAgent, { preserveCurrent: false, loadLast: true });
     });
   }
 
   if (modelPickerBtn) {
     modelPickerBtn.addEventListener('click', () => {
       if (!currentSessionId) return;
-      if (currentAgent === 'codex') {
+      if (getAgentModelControl(currentAgent)?.kind === 'reasoning') {
         showCodexModelControlPicker();
         return;
       }
@@ -3171,7 +3300,7 @@
 
   if (thinkingPickerBtn) {
     thinkingPickerBtn.addEventListener('click', () => {
-      if (!currentSessionId || currentAgent !== 'codex') return;
+      if (!currentSessionId || getAgentModelControl(currentAgent)?.kind !== 'reasoning') return;
       showCodexThinkingPicker();
     });
   }
@@ -3184,11 +3313,7 @@
   });
   importSessionBtn.addEventListener('click', () => {
     newChatDropdown.hidden = true;
-    if (currentAgent === 'codex') {
-      showImportCodexSessionModal();
-    } else {
-      showImportSessionModal();
-    }
+    showImportSessionModalForAgent(currentAgent);
   });
   document.addEventListener('click', (e) => {
     if (!newChatDropdown.hidden &&
@@ -3342,7 +3467,7 @@
   let _onModelConfig = null;
   let _onCodexConfig = null;
   let _onFetchModelsResult = null;
-  let _onCodexSessions = null;
+  let _onAgentImportSessions = null;
   let _onClaudeLocalConfig = null;
   let _onCodexLocalConfig = null;
   let _onDevConfig = null;
@@ -3407,7 +3532,7 @@
   }
 
   function buildAgentContextCard(agent, title, copy) {
-    const label = AGENT_LABELS[normalizeAgent(agent)] || AGENT_LABELS.claude;
+    const label = getAgentDefinition(agent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
     return `
       <div class="agent-context-card">
         <div class="agent-context-kicker">${escapeHtml(label)}</div>
@@ -4630,7 +4755,7 @@
 
   function showNewSessionModal() {
     const targetAgent = currentAgent;
-    const targetLabel = AGENT_LABELS[targetAgent] || AGENT_LABELS.claude;
+    const targetLabel = getAgentDefinition(targetAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.id = 'new-session-overlay';
@@ -4970,134 +5095,56 @@
     });
   }
 
-  // --- Import Native Session Modal ---
-  let _onNativeSessions = null;
-
-  function showImportSessionModal() {
-    if (currentAgent !== 'claude') return;
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.id = 'import-session-overlay';
-
-    overlay.innerHTML = `
-      <div class="modal-panel modal-panel-wide">
-        <div class="modal-header">
-          <span class="modal-title">导入本地 CLI 会话</span>
-          <button class="modal-close-btn" id="is-close-btn">✕</button>
-        </div>
-        <div class="modal-body" id="is-body">
-          ${buildAgentContextCard('claude', '从 Claude 原生历史导入', '读取 ~/.claude/projects/ 下的会话文件，恢复对话文本与工具调用，并保留 Claude 侧续接上下文。')}
-          <div class="modal-loading">正在加载…</div>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    function close() {
-      overlay.remove();
-      _onNativeSessions = null;
-    }
-
-    overlay.querySelector('#is-close-btn').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-
-    _onNativeSessions = (groups) => {
-      const body = overlay.querySelector('#is-body');
-      if (!body) return;
-      if (!groups || groups.length === 0) {
-        body.innerHTML = `${buildAgentContextCard('claude', '从 Claude 原生历史导入', '读取 ~/.claude/projects/ 下的会话文件，恢复对话文本与工具调用，并保留 Claude 侧续接上下文。')}<div class="modal-empty">未找到本地 CLI 会话</div>`;
-        return;
+  // --- Import Session Modal ---
+  function buildImportPayload(agent, spec, item, extra = {}) {
+    const payload = { agent };
+    (spec?.payloadFields || []).forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(extra, field)) {
+        payload[field] = extra[field];
+      } else {
+        payload[field] = item?.[field];
       }
-      body.innerHTML = buildAgentContextCard('claude', '从 Claude 原生历史导入', '读取 ~/.claude/projects/ 下的会话文件，恢复对话文本与工具调用，并保留 Claude 侧续接上下文。');
-      for (const group of groups) {
-        const groupEl = document.createElement('div');
-        groupEl.className = 'import-group';
-        // Convert slug dir to readable path
-        let readablePath = group.dir.replace(/-/g, '/');
-        if (!readablePath.startsWith('/')) readablePath = '/' + readablePath;
-        readablePath = readablePath.replace(/\/+/g, '/');
-        const groupTitle = document.createElement('div');
-        groupTitle.className = 'import-group-title';
-        groupTitle.textContent = readablePath;
-        groupEl.appendChild(groupTitle);
-        for (const sess of group.sessions) {
-          const item = document.createElement('div');
-          item.className = 'import-item';
-          const info = document.createElement('div');
-          info.className = 'import-item-info';
-          const titleEl = document.createElement('div');
-          titleEl.className = 'import-item-title';
-          titleEl.textContent = sess.title;
-          const meta = document.createElement('div');
-          meta.className = 'import-item-meta';
-          const cwdText = sess.cwd ? sess.cwd : '';
-          const timeText = sess.updatedAt ? timeAgo(sess.updatedAt) : '';
-          meta.textContent = [cwdText, timeText].filter(Boolean).join(' · ');
-          info.appendChild(titleEl);
-          info.appendChild(meta);
-          const btn = document.createElement('button');
-          btn.className = 'import-item-btn';
-          btn.textContent = sess.alreadyImported ? '重新导入' : '导入';
-          btn.addEventListener('click', () => {
-            if (sess.alreadyImported) {
-              if (!confirm('已导入过此会话，重新导入将覆盖已有内容。确认继续？')) return;
-            } else {
-              if (!confirm('由于 cc-web 与本地 CLI 的逻辑不同，导入会话需要解析后方可展示，导入后将覆盖已有内容。确认继续？')) return;
-            }
-            close();
-            send({ type: 'import_native_session', sessionId: sess.sessionId, projectDir: group.dir });
-          });
-          item.appendChild(info);
-          item.appendChild(btn);
-          groupEl.appendChild(item);
-        }
-        body.appendChild(groupEl);
-      }
-    };
-
-    send({ type: 'list_native_sessions' });
+    });
+    return payload;
   }
 
-  function showImportCodexSessionModal() {
-    if (currentAgent !== 'codex') return;
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.id = 'import-codex-session-overlay';
+  function createImportActionButton(agent, spec, item, close, extra = {}) {
+    const btn = document.createElement('button');
+    btn.className = 'import-item-btn';
+    btn.textContent = item?.alreadyImported ? '重新导入' : '导入';
+    btn.addEventListener('click', () => {
+      const confirmed = item?.alreadyImported
+        ? confirm(spec?.reimportConfirm || '确认重新导入当前会话？')
+        : confirm(spec?.importConfirm || '确认导入当前会话？');
+      if (!confirmed) return;
+      close();
+      send({
+        type: spec.actionType,
+        ...buildImportPayload(agent, spec, item, extra),
+      });
+    });
+    return btn;
+  }
 
-    overlay.innerHTML = `
-      <div class="modal-panel modal-panel-wide">
-        <div class="modal-header">
-          <span class="modal-title">导入本地 Codex 会话</span>
-          <button class="modal-close-btn" id="ics-close-btn">✕</button>
-        </div>
-        <div class="modal-body" id="ics-body">
-          ${buildAgentContextCard('codex', '从 Codex rollout 历史导入', '读取 ~/.codex/sessions/ 下的 rollout 文件，恢复用户消息、助手输出、函数调用和 token 统计。')}
-          <div class="modal-loading">正在加载 Codex 本地历史…</div>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    function close() {
-      overlay.remove();
-      _onCodexSessions = null;
+  function renderGroupedImportSessions(body, agent, spec, groups, close) {
+    if (!Array.isArray(groups) || groups.length === 0) {
+      body.innerHTML = `${buildAgentContextCard(agent, spec.contextTitle, spec.contextCopy)}<div class="modal-empty">${escapeHtml(spec.emptyText || '未找到可导入会话')}</div>`;
+      return;
     }
+    body.innerHTML = buildAgentContextCard(agent, spec.contextTitle, spec.contextCopy);
+    groups.forEach((group) => {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'import-group';
+      let readablePath = String(group?.dir || '').replace(/-/g, '/');
+      if (!readablePath.startsWith('/')) readablePath = '/' + readablePath;
+      readablePath = readablePath.replace(/\/+/g, '/');
 
-    overlay.querySelector('#ics-close-btn').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+      const groupTitle = document.createElement('div');
+      groupTitle.className = 'import-group-title';
+      groupTitle.textContent = readablePath;
+      groupEl.appendChild(groupTitle);
 
-    _onCodexSessions = (items) => {
-      const body = overlay.querySelector('#ics-body');
-      if (!body) return;
-      if (!items || items.length === 0) {
-        body.innerHTML = `${buildAgentContextCard('codex', '从 Codex rollout 历史导入', '读取 ~/.codex/sessions/ 下的 rollout 文件，恢复用户消息、助手输出、函数调用和 token 统计。')}<div class="modal-empty">未找到本地 Codex 会话</div>`;
-        return;
-      }
-
-      body.innerHTML = buildAgentContextCard('codex', '从 Codex rollout 历史导入', '读取 ~/.codex/sessions/ 下的 rollout 文件，恢复用户消息、助手输出、函数调用和 token 统计。');
-      items.forEach((sess) => {
+      (group?.sessions || []).forEach((sess) => {
         const item = document.createElement('div');
         item.className = 'import-item';
 
@@ -5106,54 +5153,119 @@
 
         const titleEl = document.createElement('div');
         titleEl.className = 'import-item-title';
-        titleEl.textContent = sess.title || sess.threadId;
+        titleEl.textContent = sess.title;
 
         const meta = document.createElement('div');
         meta.className = 'import-item-meta';
-        meta.textContent = [
-          sess.cwd || '',
-          sess.source ? `source:${sess.source}` : '',
-          sess.updatedAt ? timeAgo(sess.updatedAt) : '',
-        ].filter(Boolean).join(' · ');
-
-        const tags = document.createElement('div');
-        tags.className = 'import-item-tags';
-        if (sess.cliVersion) {
-          const ver = document.createElement('span');
-          ver.className = 'import-item-tag';
-          ver.textContent = `CLI ${sess.cliVersion}`;
-          tags.appendChild(ver);
-        }
-        if (sess.source) {
-          const source = document.createElement('span');
-          source.className = 'import-item-tag';
-          source.textContent = sess.source;
-          tags.appendChild(source);
-        }
+        meta.textContent = [sess.cwd || '', sess.updatedAt ? timeAgo(sess.updatedAt) : ''].filter(Boolean).join(' · ');
 
         info.appendChild(titleEl);
         info.appendChild(meta);
-        if (tags.children.length > 0) info.appendChild(tags);
-
-        const btn = document.createElement('button');
-        btn.className = 'import-item-btn';
-        btn.textContent = sess.alreadyImported ? '重新导入' : '导入';
-        btn.addEventListener('click', () => {
-          const confirmed = sess.alreadyImported
-            ? confirm('已导入过此 Codex 会话，重新导入将覆盖已有内容。确认继续？')
-            : confirm('将解析本地 Codex rollout 历史并导入当前 Web 视图。确认继续？');
-          if (!confirmed) return;
-          close();
-          send({ type: 'import_codex_session', threadId: sess.threadId, rolloutPath: sess.rolloutPath });
-        });
-
         item.appendChild(info);
-        item.appendChild(btn);
-        body.appendChild(item);
+        item.appendChild(createImportActionButton(agent, spec, sess, close, { projectDir: group.dir }));
+        groupEl.appendChild(item);
       });
+
+      body.appendChild(groupEl);
+    });
+  }
+
+  function renderFlatImportSessions(body, agent, spec, items, close) {
+    if (!Array.isArray(items) || items.length === 0) {
+      body.innerHTML = `${buildAgentContextCard(agent, spec.contextTitle, spec.contextCopy)}<div class="modal-empty">${escapeHtml(spec.emptyText || '未找到可导入会话')}</div>`;
+      return;
+    }
+
+    body.innerHTML = buildAgentContextCard(agent, spec.contextTitle, spec.contextCopy);
+    items.forEach((sess) => {
+      const item = document.createElement('div');
+      item.className = 'import-item';
+
+      const info = document.createElement('div');
+      info.className = 'import-item-info';
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'import-item-title';
+      titleEl.textContent = sess.title || sess.threadId || sess.sessionId || 'Untitled';
+
+      const meta = document.createElement('div');
+      meta.className = 'import-item-meta';
+      meta.textContent = [
+        sess.cwd || '',
+        sess.source ? `source:${sess.source}` : '',
+        sess.updatedAt ? timeAgo(sess.updatedAt) : '',
+      ].filter(Boolean).join(' · ');
+
+      const tags = document.createElement('div');
+      tags.className = 'import-item-tags';
+      if (sess.cliVersion) {
+        const ver = document.createElement('span');
+        ver.className = 'import-item-tag';
+        ver.textContent = `CLI ${sess.cliVersion}`;
+        tags.appendChild(ver);
+      }
+      if (sess.source) {
+        const source = document.createElement('span');
+        source.className = 'import-item-tag';
+        source.textContent = sess.source;
+        tags.appendChild(source);
+      }
+
+      info.appendChild(titleEl);
+      info.appendChild(meta);
+      if (tags.children.length > 0) info.appendChild(tags);
+
+      item.appendChild(info);
+      item.appendChild(createImportActionButton(agent, spec, sess, close));
+      body.appendChild(item);
+    });
+  }
+
+  function showImportSessionModalForAgent(agent) {
+    const normalizedAgent = normalizeAgent(agent);
+    const spec = getAgentImportSpec(normalizedAgent);
+    if (!spec) return;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = `import-${normalizedAgent}-session-overlay`;
+
+    overlay.innerHTML = `
+      <div class="modal-panel modal-panel-wide">
+        <div class="modal-header">
+          <span class="modal-title">${escapeHtml(spec.modalTitle || '导入本地会话')}</span>
+          <button class="modal-close-btn" id="import-session-close-btn">✕</button>
+        </div>
+        <div class="modal-body" id="import-session-body">
+          ${buildAgentContextCard(normalizedAgent, spec.contextTitle, spec.contextCopy)}
+          <div class="modal-loading">${escapeHtml(spec.loadingText || '正在加载…')}</div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    function close() {
+      overlay.remove();
+      _onAgentImportSessions = null;
+    }
+
+    overlay.querySelector('#import-session-close-btn').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    _onAgentImportSessions = (payload) => {
+      if (normalizeAgent(payload?.agent) !== normalizedAgent) return;
+      const body = overlay.querySelector('#import-session-body');
+      if (!body) return;
+      const data = payload?.data;
+      if (spec.listStyle === 'grouped') {
+        renderGroupedImportSessions(body, normalizedAgent, spec, data, close);
+      } else {
+        renderFlatImportSessions(body, normalizedAgent, spec, data, close);
+      }
     };
 
-    send({ type: 'list_codex_sessions' });
+    send({ type: spec.requestType, agent: normalizedAgent });
   }
 
   // --- Helpers ---
