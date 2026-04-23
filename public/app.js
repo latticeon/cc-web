@@ -221,10 +221,8 @@
   const importSessionBtn = $('#import-session-btn');
   const sessionList = $('#session-list');
   const chatTitle = $('#chat-title');
-  const chatAgentBtn = $('#chat-agent-btn');
   const modelPickerBtn = $('#model-picker-btn');
   const thinkingPickerBtn = $('#thinking-picker-btn');
-  const chatAgentMenu = $('#chat-agent-menu');
   const chatRuntimeState = $('#chat-runtime-state');
   const chatCwdRow = $('#chat-cwd-row');
   const chatCwd = $('#chat-cwd');
@@ -263,15 +261,6 @@
       return `<img src="${escapeHtml(spec.avatar)}" width="24" height="24" style="display:block;" alt="${escapeHtml(spec.label || 'Agent')}">`;
     }
     return escapeHtml((spec?.label || 'A').slice(0, 1).toUpperCase());
-  }
-
-  function renderAgentMenu() {
-    if (!chatAgentMenu) return;
-    chatAgentMenu.innerHTML = AGENT_CATALOG.map((agent) => `
-      <button type="button" class="chat-agent-option${agent.id === currentAgent ? ' active' : ''}" data-agent="${escapeHtml(agent.id)}" aria-pressed="${agent.id === currentAgent ? 'true' : 'false'}">
-        ${escapeHtml(agent.label)}
-      </button>
-    `).join('');
   }
 
   function normalizeTheme(theme) {
@@ -1160,7 +1149,13 @@
   }
 
   function getVisibleSessions() {
-    return sessions.filter((s) => normalizeAgent(s.agent) === currentAgent);
+    return sessions;
+  }
+
+  function renderSessionAgentBadge(agent) {
+    const normalized = normalizeAgent(agent);
+    const label = getAgentDefinition(normalized)?.label || 'Agent';
+    return `<span class="session-agent-badge agent-${escapeHtml(normalized)}">${escapeHtml(label)}</span>`;
   }
 
   function getPathLeaf(pathValue) {
@@ -1190,7 +1185,7 @@
   }
 
   function updateCwdBadge() {
-    if (!chatCwd) return;
+    if (!chatCwd || !chatCwdRow) return;
     if (currentCwd) {
       chatCwd.textContent = currentCwd;
       chatCwd.title = currentCwd;
@@ -1200,7 +1195,7 @@
     }
     const hidden = !currentCwd;
     chatCwd.hidden = hidden;
-    if (chatCwdRow) chatCwdRow.hidden = hidden;
+    chatCwdRow.hidden = hidden;
   }
 
   function setCurrentSessionRunningState(isRunning) {
@@ -1274,18 +1269,6 @@
   }
 
   function updateAgentScopedUI() {
-    if (chatAgentBtn) {
-      chatAgentBtn.textContent = getAgentDefinition(currentAgent)?.label || currentAgent;
-      chatAgentBtn.setAttribute('aria-expanded', chatAgentMenu && !chatAgentMenu.hidden ? 'true' : 'false');
-    }
-    if (chatAgentMenu) {
-      renderAgentMenu();
-      chatAgentMenu.querySelectorAll('.chat-agent-option').forEach((btn) => {
-        const active = btn.dataset.agent === currentAgent;
-        btn.classList.toggle('active', active);
-        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-      });
-    }
     if (importSessionBtn) {
       const importSpec = getAgentImportSpec(currentAgent);
       importSessionBtn.hidden = !importSpec;
@@ -1302,19 +1285,6 @@
     currentMode = localStorage.getItem(getAgentModeStorageKey(currentAgent)) || 'yolo';
     modeSelect.value = currentMode;
     updateAgentScopedUI();
-  }
-
-  function closeAgentMenu() {
-    if (!chatAgentMenu) return;
-    chatAgentMenu.hidden = true;
-    if (chatAgentBtn) chatAgentBtn.setAttribute('aria-expanded', 'false');
-  }
-
-  function toggleAgentMenu() {
-    if (!chatAgentMenu || !chatAgentBtn) return;
-    const willOpen = chatAgentMenu.hidden;
-    chatAgentMenu.hidden = !willOpen;
-    chatAgentBtn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
   }
 
   function resetChatView(agent) {
@@ -2755,13 +2725,14 @@
     if (visibleSessions.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'session-list-empty';
-      empty.textContent = `暂无 ${AGENT_LABELS[currentAgent]} 会话，点击“新会话”开始。`;
+      empty.textContent = '暂无会话，点击“新会话”开始。';
       sessionList.appendChild(empty);
       return;
     }
 
     for (const s of visibleSessions) {
       const directoryMeta = getSessionDirectoryMeta(s);
+      const agentBadge = renderSessionAgentBadge(s.agent);
       const item = document.createElement('div');
       item.className = `session-item${s.id === currentSessionId ? ' active' : ''}`;
       item.dataset.id = s.id;
@@ -2771,7 +2742,16 @@
             <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
             ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
           </div>
-          ${directoryMeta ? `<div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">${escapeHtml(directoryMeta.text)}</div>` : ''}
+          ${directoryMeta ? `
+            <div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">
+              ${agentBadge}
+              <span class="session-item-cwd-text">${escapeHtml(directoryMeta.text)}</span>
+            </div>
+          ` : `
+            <div class="session-item-cwd session-item-cwd--badge-only">
+              ${agentBadge}
+            </div>
+          `}
         </div>
         ${s.hasUnread ? '<span class="session-unread-dot"></span>' : ''}
         <span class="session-item-time">${timeAgo(s.updated)}</span>
@@ -3271,22 +3251,6 @@
   document.addEventListener('touchend', handleSidebarSwipeEnd, { passive: true });
   document.addEventListener('touchcancel', () => { sidebarSwipe = null; }, { passive: true });
 
-  if (chatAgentBtn && chatAgentMenu) {
-    chatAgentBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleAgentMenu();
-    });
-    chatAgentMenu.addEventListener('click', (e) => {
-      const btn = e.target.closest('.chat-agent-option');
-      if (!btn) return;
-      e.stopPropagation();
-      closeAgentMenu();
-      const targetAgent = normalizeAgent(btn.dataset.agent);
-      if (targetAgent === currentAgent) return;
-      syncViewForAgent(targetAgent, { preserveCurrent: false, loadLast: true });
-    });
-  }
-
   if (modelPickerBtn) {
     modelPickerBtn.addEventListener('click', () => {
       if (!currentSessionId) return;
@@ -3320,11 +3284,6 @@
         !newChatDropdown.contains(e.target) &&
         e.target !== newChatArrow) {
       newChatDropdown.hidden = true;
-    }
-    if (chatAgentMenu && !chatAgentMenu.hidden &&
-        !chatAgentMenu.contains(e.target) &&
-        e.target !== chatAgentBtn) {
-      closeAgentMenu();
     }
   });
   sendBtn.addEventListener('click', sendMessage);
@@ -4754,8 +4713,8 @@
   }
 
   function showNewSessionModal() {
-    const targetAgent = currentAgent;
-    const targetLabel = getAgentDefinition(targetAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
+    let selectedAgent = normalizeAgent(currentAgent);
+    const initialLabel = getAgentDefinition(selectedAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.id = 'new-session-overlay';
@@ -4763,12 +4722,16 @@
     overlay.innerHTML = `
       <div class="modal-panel modal-panel-wide">
         <div class="modal-header">
-          <span class="modal-title">新建 ${escapeHtml(targetLabel)} 会话</span>
+          <span class="modal-title" id="ns-title">新建 ${escapeHtml(initialLabel)} 会话</span>
           <button class="modal-close-btn" id="ns-close-btn">✕</button>
         </div>
         <div class="modal-body">
+          <div>
+            <div class="modal-field-label" style="margin-bottom:6px">选择 Agent</div>
+            <div class="ns-agent-grid" id="ns-agent-grid"></div>
+          </div>
           <div class="agent-context-card" style="margin-bottom:12px">
-            <div class="agent-context-kicker" id="ns-task-label">${escapeHtml(targetLabel)} · 本地任务</div>
+            <div class="agent-context-kicker" id="ns-task-label">${escapeHtml(initialLabel)} · 本地任务</div>
           </div>
           <div style="display:flex;gap:8px;margin-bottom:12px">
             <button class="btn-test ns-task-tab active" id="ns-tab-local" style="flex:1;padding:6px 12px">本地任务</button>
@@ -4788,11 +4751,53 @@
 
     let currentTab = 'local';
     let selectedHostId = '';
+    const titleEl = overlay.querySelector('#ns-title');
+    const agentGrid = overlay.querySelector('#ns-agent-grid');
     const tabLocal = overlay.querySelector('#ns-tab-local');
     const tabRemote = overlay.querySelector('#ns-tab-remote');
     const localView = overlay.querySelector('#ns-local-view');
     const remoteView = overlay.querySelector('#ns-remote-view');
     const taskLabel = overlay.querySelector('#ns-task-label');
+
+    function getSelectedAgentLabel() {
+      return getAgentDefinition(selectedAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
+    }
+
+    function getSelectedAgentMode() {
+      return localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo';
+    }
+
+    function renderAgentOptions() {
+      if (!agentGrid) return;
+      agentGrid.innerHTML = AGENT_CATALOG.map((agent) => `
+        <button
+          type="button"
+          class="ns-agent-card${agent.id === selectedAgent ? ' active' : ''}"
+          data-ns-agent="${escapeHtml(agent.id)}"
+          aria-pressed="${agent.id === selectedAgent ? 'true' : 'false'}"
+        >
+          <span class="ns-agent-card-kicker">Agent</span>
+          <span class="ns-agent-card-label">${escapeHtml(agent.label)}</span>
+          <span class="ns-agent-card-desc">用于创建新的 ${escapeHtml(agent.label)} 会话</span>
+        </button>
+      `).join('');
+      agentGrid.querySelectorAll('[data-ns-agent]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const nextAgent = normalizeAgent(button.dataset.nsAgent);
+          if (nextAgent === selectedAgent) return;
+          selectedAgent = nextAgent;
+          selectedQuickCwd = '';
+          selectedSuggestedCwd = '';
+          cwdSuggestionItems = [];
+          cwdSuggestionsLoading = true;
+          renderAgentOptions();
+          switchTab(currentTab);
+          renderLocalView();
+          renderRemoteView();
+          send({ type: 'list_cwd_suggestions', agent: selectedAgent });
+        });
+      });
+    }
 
     function switchTab(tab) {
       currentTab = tab;
@@ -4802,10 +4807,12 @@
       tabRemote.style.opacity = tab === 'remote' ? '1' : '0.6';
       localView.style.display = tab === 'local' ? '' : 'none';
       remoteView.style.display = tab === 'remote' ? '' : 'none';
-      taskLabel.textContent = targetLabel + (tab === 'local' ? ' · 本地任务' : ' · 远程任务');
+      if (titleEl) titleEl.textContent = `新建 ${getSelectedAgentLabel()} 会话`;
+      taskLabel.textContent = getSelectedAgentLabel() + (tab === 'local' ? ' · 本地任务' : ' · 远程任务');
     }
     tabLocal.addEventListener('click', () => switchTab('local'));
     tabRemote.addEventListener('click', () => switchTab('remote'));
+    renderAgentOptions();
     switchTab('local');
 
     // --- Local task view ---
@@ -4818,7 +4825,7 @@
     const prevOnCwdSuggestions = _onCwdSuggestions;
 
     function getQuickDirs() {
-      const pinned = getPinnedCwds(targetAgent);
+      const pinned = getPinnedCwds(selectedAgent);
       const recent = getRecentCwds().filter(p => !pinned.includes(p));
       return [...pinned, ...recent].slice(0, 5);
     }
@@ -4848,7 +4855,7 @@
     }
 
     function renderLocalView() {
-      const currentPinned = getPinnedCwds(targetAgent);
+      const currentPinned = getPinnedCwds(selectedAgent);
       const quickDirs = getQuickDirs();
       const historyItems = cwdSuggestionItems.filter((item) => !quickDirs.includes(item.path));
       syncLocalSelection(quickDirs, historyItems);
@@ -4959,11 +4966,11 @@
           e.stopPropagation();
           const cwd = btn.dataset.cwd;
           if (!cwd) return;
-          const currentPinned2 = getPinnedCwds(targetAgent);
+          const currentPinned2 = getPinnedCwds(selectedAgent);
           if (currentPinned2.includes(cwd)) {
-            removePinnedCwd(targetAgent, cwd);
+            removePinnedCwd(selectedAgent, cwd);
           } else {
-            savePinnedCwd(targetAgent, cwd);
+            savePinnedCwd(selectedAgent, cwd);
           }
           selectedLocalMode = 'quick';
           selectedQuickCwd = cwd;
@@ -4976,7 +4983,7 @@
           e.stopPropagation();
           const cwd = btn.dataset.cwd;
           if (!cwd) return;
-          removePinnedCwd(targetAgent, cwd);
+          removePinnedCwd(selectedAgent, cwd);
           const recents = getRecentCwds().filter(p => p !== cwd);
           try { localStorage.setItem(RECENT_CWD_KEY, JSON.stringify(recents)); } catch {}
           if (selectedQuickCwd === cwd) selectedQuickCwd = '';
@@ -5000,7 +5007,7 @@
     }
 
     _onCwdSuggestions = (payload) => {
-      if (normalizeAgent(payload.agent) !== targetAgent) return;
+      if (normalizeAgent(payload.agent) !== selectedAgent) return;
       cwdSuggestionsLoading = false;
       cwdSuggestionItems = Array.isArray(payload.items)
         ? payload.items
@@ -5008,7 +5015,7 @@
       renderLocalView();
     };
 
-    send({ type: 'list_cwd_suggestions', agent: targetAgent });
+    send({ type: 'list_cwd_suggestions', agent: selectedAgent });
     renderLocalView();
 
     // --- Remote task view ---
@@ -5081,7 +5088,7 @@
         }
         close();
         saveRecentCwd(cwd);
-        send({ type: 'new_session', cwd, agent: targetAgent, mode: currentMode, taskMode: 'local' });
+        send({ type: 'new_session', cwd, agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'local' });
       } else {
         // Remote task
         if (!selectedHostId) {
@@ -5090,7 +5097,7 @@
         }
         const remoteCwd = remoteView.querySelector('#ns-remote-cwd')?.value?.trim() || '';
         close();
-        send({ type: 'new_session', agent: targetAgent, mode: currentMode, taskMode: 'remote', sshHostId: selectedHostId, remoteCwd });
+        send({ type: 'new_session', agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'remote', sshHostId: selectedHostId, remoteCwd });
       }
     });
   }
