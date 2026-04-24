@@ -2134,7 +2134,7 @@ const server = http.createServer((req, res) => {
   let filePath = path.join(PUBLIC_DIR, url.pathname === '/' ? 'index.html' : url.pathname);
   filePath = path.resolve(filePath);
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (!isPathInside(PUBLIC_DIR, filePath)) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
@@ -3159,6 +3159,26 @@ function sqlQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function normalizeComparablePath(targetPath) {
+  const resolved = path.resolve(String(targetPath || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isPathInside(basePath, targetPath) {
+  if (!basePath || !targetPath) return false;
+  let base;
+  let target;
+  try {
+    base = normalizeComparablePath(basePath);
+    target = normalizeComparablePath(targetPath);
+  } catch {
+    return false;
+  }
+  if (base === target) return true;
+  const relativePath = path.relative(base, target);
+  return !!relativePath && relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
+}
+
 function deleteClaudeLocalSession(claudeSessionId) {
   if (!claudeSessionId) return;
   const projectsDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'projects');
@@ -3185,7 +3205,7 @@ function deleteCodexLocalSession(session) {
   let removedFiles = 0;
   for (const filePath of rolloutPaths) {
     try {
-      if (filePath.startsWith(CODEX_SESSIONS_DIR) && fs.existsSync(filePath)) {
+      if (isPathInside(CODEX_SESSIONS_DIR, filePath) && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
         removedFiles++;
       }
@@ -4392,7 +4412,7 @@ function handleImportNativeSession(ws, msg) {
     return wsSend(ws, { type: 'error', message: '缺少 sessionId 或 projectDir' });
   }
   const filePath = path.join(CLAUDE_PROJECTS_DIR, String(projectDir), `${sanitizeId(sessionId)}.jsonl`);
-  if (!filePath.startsWith(CLAUDE_PROJECTS_DIR)) {
+  if (!isPathInside(CLAUDE_PROJECTS_DIR, filePath)) {
     return wsSend(ws, { type: 'error', message: '非法路径' });
   }
   let content;
@@ -4509,7 +4529,7 @@ function handleImportCodexSession(ws, msg) {
 
   let parsed = null;
   const requestedPath = msg?.rolloutPath ? path.resolve(String(msg.rolloutPath)) : '';
-  if (requestedPath && requestedPath.startsWith(CODEX_SESSIONS_DIR) && fs.existsSync(requestedPath)) {
+  if (requestedPath && isPathInside(CODEX_SESSIONS_DIR, requestedPath) && fs.existsSync(requestedPath)) {
     parsed = parseCodexRolloutFile(requestedPath);
   }
   if (!parsed) {
