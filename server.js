@@ -64,7 +64,7 @@ function resolveDefaultCodexPath() {
 }
 const CODEX_PATH = resolveDefaultCodexPath();
 function resolveDefaultKimiPath() {
-  if (process.env.KIMI_PATH) return process.env.KIMI_PATH;
+  if (isConfiguredCliPathUsable(process.env.KIMI_PATH)) return process.env.KIMI_PATH;
   if (process.platform !== 'win32') return 'kimi';
   const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
   const cmdPath = path.join(appData, 'npm', 'kimi.cmd');
@@ -73,7 +73,7 @@ function resolveDefaultKimiPath() {
 }
 const KIMI_PATH = resolveDefaultKimiPath();
 function resolveDefaultOpencodePath() {
-  if (process.env.OPENCODE_PATH) return process.env.OPENCODE_PATH;
+  if (isConfiguredCliPathUsable(process.env.OPENCODE_PATH)) return process.env.OPENCODE_PATH;
   if (process.platform !== 'win32') return 'opencode';
   const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
   const ps1Path = path.join(appData, 'npm', 'opencode.ps1');
