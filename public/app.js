@@ -144,6 +144,10 @@
     return spec?.enabled ? spec : null;
   }
 
+  function getImportableAgents() {
+    return AGENT_CATALOG.filter((agent) => getAgentImportSpec(agent.id));
+  }
+
   const MODE_PICKER_OPTIONS = [
     { value: 'yolo', label: 'YOLO', desc: '跳过所有权限检查' },
     { value: 'plan', label: 'Plan', desc: '执行前需确认计划' },
@@ -218,7 +222,6 @@
   const newChatBtn = $('#new-chat-btn');
   const newChatArrow = $('#new-chat-arrow');
   const newChatDropdown = $('#new-chat-dropdown');
-  const importSessionBtn = $('#import-session-btn');
   const sessionList = $('#session-list');
   const chatTitle = $('#chat-title');
   const modelPickerBtn = $('#model-picker-btn');
@@ -1268,14 +1271,21 @@
     thinkingPickerBtn.disabled = true;
   }
 
+  function renderImportSessionMenu() {
+    if (!newChatDropdown) return 0;
+    const importableAgents = getImportableAgents();
+    newChatDropdown.innerHTML = importableAgents.map((agent) => {
+      const spec = getAgentImportSpec(agent.id);
+      const label = spec?.buttonLabel || `导入本地 ${agent.label} 会话`;
+      return `<button type="button" data-import-agent="${escapeHtml(agent.id)}">${escapeHtml(label)}</button>`;
+    }).join('');
+    return importableAgents.length;
+  }
+
   function updateAgentScopedUI() {
-    if (importSessionBtn) {
-      const importSpec = getAgentImportSpec(currentAgent);
-      importSessionBtn.hidden = !importSpec;
-      importSessionBtn.textContent = importSpec?.buttonLabel || '导入本地会话';
-      if (!importSpec && !newChatDropdown.hidden) newChatDropdown.hidden = true;
-      if (newChatArrow) newChatArrow.hidden = !importSpec;
-    }
+    const importableCount = renderImportSessionMenu();
+    if (!importableCount && newChatDropdown && !newChatDropdown.hidden) newChatDropdown.hidden = true;
+    if (newChatArrow) newChatArrow.hidden = importableCount === 0;
     updateModelControls();
   }
 
@@ -3273,11 +3283,14 @@
   newChatBtn.addEventListener('click', () => showNewSessionModal());
   newChatArrow.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (newChatArrow.hidden) return;
     newChatDropdown.hidden = !newChatDropdown.hidden;
   });
-  importSessionBtn.addEventListener('click', () => {
+  newChatDropdown.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-import-agent]');
+    if (!btn) return;
     newChatDropdown.hidden = true;
-    showImportSessionModalForAgent(currentAgent);
+    showImportSessionModalForAgent(btn.dataset.importAgent);
   });
   document.addEventListener('click', (e) => {
     if (!newChatDropdown.hidden &&
