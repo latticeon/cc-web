@@ -81,6 +81,7 @@ copy .env.example .env  & REM 可选
 | `CC_WEB_CONFIG_DIR` | 否 | `./config` | 配置目录覆写（主要供隔离测试使用） |
 | `CC_WEB_SESSIONS_DIR` | 否 | `./sessions` | 会话目录覆写（主要供隔离测试使用） |
 | `CC_WEB_LOGS_DIR` | 否 | `./logs` | 日志目录覆写（主要供隔离测试使用） |
+| `CC_WEB_TRUST_PROXY` | 否 | `false` | 信任反向代理提供的 `X-Real-IP` / `X-Forwarded-For`，反代不在本机时可开启 |
 | `PUSHPLUS_TOKEN` | 否 | - | PushPlus Token（首次启动自动迁移到通知配置） |
 
 ### 通知配置

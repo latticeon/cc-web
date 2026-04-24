@@ -545,6 +545,7 @@ let bannedIPs = new Map(); // ip -> expireTimestamp
 // Tailscale / loopback whitelist — never ban these IPs.
 // Extra whitelist can be provided via env var (comma/space separated):
 //   CC_WEB_IP_WHITELIST="<ip1>,<ip2>"
+const TRUST_PROXY_HEADERS = /^(1|true|yes)$/i.test(String(process.env.CC_WEB_TRUST_PROXY || ''));
 const EXTRA_WHITELIST_IPS = new Set(
   String(process.env.CC_WEB_IP_WHITELIST || '')
     .split(/[\s,]+/)
@@ -553,9 +554,18 @@ const EXTRA_WHITELIST_IPS = new Set(
     .map(s => s.replace(/^::ffff:/, ''))
 );
 
+function normalizeIp(ip) {
+  return String(ip || '').trim().replace(/^::ffff:/, '');
+}
+
+function isLoopbackIp(ip) {
+  const cleaned = normalizeIp(ip);
+  return cleaned === '127.0.0.1' || cleaned === '::1';
+}
+
 function isWhitelistedIP(ip) {
-  if (!ip) return false;
-  const cleaned = ip.replace(/^::ffff:/, '');
+  const cleaned = normalizeIp(ip);
+  if (!cleaned) return false;
   return cleaned === '127.0.0.1'
     || cleaned === '::1'
     || cleaned.startsWith('100.')
@@ -584,9 +594,15 @@ loadBannedIPs();
 function getClientIP(ws) {
   const req = ws._req;
   if (!req) return null;
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) return forwarded.split(',')[0].trim();
-  return req.socket?.remoteAddress || null;
+  const socketIp = normalizeIp(req.socket?.remoteAddress || '');
+  if (TRUST_PROXY_HEADERS || isLoopbackIp(socketIp)) {
+    const realIp = normalizeIp(req.headers['x-real-ip']);
+    if (realIp) return realIp;
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0];
+    const forwardedIp = normalizeIp(forwarded);
+    if (forwardedIp) return forwardedIp;
+  }
+  return socketIp || null;
 }
 
 function isBanned(ip) {

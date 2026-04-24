@@ -76,6 +76,7 @@ After startup, open `http://localhost:8002` and sign in with your password.
 | `CLAUDE_PATH` | No | `claude` | Executable path to Claude CLI |
 | `CODEX_PATH` | No | `codex` | Executable path to Codex CLI |
 | `KIMI_PATH` | No | `kimi` | Executable path to Kimi CLI |
+| `CC_WEB_TRUST_PROXY` | No | `false` | Trust `X-Real-IP` / `X-Forwarded-For` from a reverse proxy; enable when the proxy is not on the same host |
 | `PUSHPLUS_TOKEN` | No | - | PushPlus token (migrated into notification config on first start) |
 
 ### Notification Configuration
