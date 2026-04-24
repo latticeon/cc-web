@@ -1926,6 +1926,9 @@ wss.on('connection', (ws, req) => {
       case 'save_codex_config':
         handleSaveCodexConfig(ws, msg.config);
         break;
+      case 'list_agent_models':
+        handleListAgentModels(ws, msg);
+        break;
       case 'fetch_models':
         handleFetchModels(ws, msg);
         break;
@@ -2345,6 +2348,32 @@ function handleFetchModels(ws, msg) {
     wsSend(ws, { type: 'fetch_models_result', success: false, message: '请求超时 (15s)' });
   });
   req.end();
+}
+
+function handleListAgentModels(ws, msg) {
+  const agent = normalizeAgent(msg?.agent);
+  const requestId = String(msg?.requestId || '').trim() || null;
+
+  if (agent === 'opencode') {
+    const result = listOpencodeModels();
+    return wsSend(ws, {
+      type: 'agent_models_result',
+      agent,
+      requestId,
+      success: !!result.success,
+      models: result.models || [],
+      message: result.message || '',
+    });
+  }
+
+  wsSend(ws, {
+    type: 'agent_models_result',
+    agent,
+    requestId,
+    success: false,
+    models: [],
+    message: `${getAgentLabel(agent)} 暂不支持读取模型列表`,
+  });
 }
 
 // === Slash Command Handler ===
@@ -3567,6 +3596,45 @@ function getOpencodeCliSpec(args = []) {
     };
   }
   return { command: OPENCODE_PATH, args };
+}
+
+function listOpencodeModels() {
+  try {
+    const cliSpec = getOpencodeCliSpec(['models']);
+    const result = spawnSync(cliSpec.command, cliSpec.args, {
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.error) {
+      return {
+        success: false,
+        models: [],
+        message: formatRuntimeError('opencode', String(result.error.message || result.error)),
+      };
+    }
+    if (result.status !== 0) {
+      const raw = [result.stderr, result.stdout].filter(Boolean).join('\n').trim() || '无法读取模型列表';
+      return {
+        success: false,
+        models: [],
+        message: formatRuntimeError('opencode', raw, { exitCode: result.status }),
+      };
+    }
+    const models = Array.from(new Set(
+      String(result.stdout || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+    )).sort((a, b) => a.localeCompare(b));
+    return { success: true, models, message: '' };
+  } catch (error) {
+    return {
+      success: false,
+      models: [],
+      message: formatRuntimeError('opencode', String(error?.message || error || '无法读取模型列表')),
+    };
+  }
 }
 
 function loadOpencodeExport(sessionId) {

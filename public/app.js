@@ -100,7 +100,14 @@
       avatar: '',
       default: false,
       defaults: { initialModel: '' },
-      modelControl: null,
+      modelControl: {
+        kind: 'dynamic',
+        title: '选择 OpenCode 模型',
+        loadingText: '正在加载 OpenCode 模型…',
+        emptyText: '未获取到 OpenCode 可用模型',
+        emptyLabel: '选择模型',
+        sourceLabel: 'OpenCode CLI',
+      },
       import: {
         enabled: true,
         requestType: 'list_agent_import_sessions',
@@ -204,6 +211,9 @@
   let currentSessionId = null;
   let sessions = [];
   let sessionCache = new Map();
+  let agentModelOptionsCache = new Map();
+  let pendingAgentModelRequests = new Map();
+  let agentModelRequestSeq = 0;
   let isGenerating = false;
   let reconnectAttempts = 0;
   let reconnectTimer = null;
@@ -1257,6 +1267,97 @@
     return normalized || '默认思考';
   }
 
+  function buildDynamicModelOptions(agent, modelControl, remoteModels) {
+    const items = [];
+    const seen = new Set();
+    const normalizedAgent = normalizeAgent(agent);
+
+    function addOption(value, desc) {
+      const normalizedValue = String(value || '').trim();
+      if (!normalizedValue || seen.has(normalizedValue)) return;
+      seen.add(normalizedValue);
+      items.push({
+        value: normalizedValue,
+        label: normalizedValue,
+        desc: desc || (modelControl?.sourceLabel || '可用模型'),
+      });
+    }
+
+    addOption(currentModel, '当前会话模型');
+
+    sessions
+      .filter((session) => normalizeAgent(session.agent) === normalizedAgent)
+      .slice()
+      .sort((a, b) => new Date(b.updated || 0).getTime() - new Date(a.updated || 0).getTime())
+      .forEach((session) => {
+        addOption(session.model, session.id === currentSessionId ? '当前会话已保存模型' : '最近会话');
+      });
+
+    (remoteModels || []).forEach((model) => {
+      addOption(model, modelControl?.sourceLabel || '可用模型');
+    });
+
+    return items;
+  }
+
+  function requestAgentModels(agent) {
+    const normalizedAgent = normalizeAgent(agent);
+    const requestId = `agent-models-${normalizedAgent}-${Date.now()}-${++agentModelRequestSeq}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (!pendingAgentModelRequests.has(requestId)) return;
+        pendingAgentModelRequests.delete(requestId);
+        resolve({
+          agent: normalizedAgent,
+          requestId,
+          success: false,
+          models: [],
+          message: '加载模型列表超时，请重试',
+        });
+      }, 15000);
+
+      pendingAgentModelRequests.set(requestId, (payload) => {
+        clearTimeout(timer);
+        resolve(payload);
+      });
+      send({ type: 'list_agent_models', agent: normalizedAgent, requestId });
+    });
+  }
+
+  async function showDynamicModelPicker() {
+    const requestedAgent = normalizeAgent(currentAgent);
+    const requestedSessionId = currentSessionId;
+    const modelControl = getAgentModelControl(requestedAgent);
+    if (modelControl?.kind !== 'dynamic' || !requestedSessionId) return;
+
+    hideOptionPicker();
+
+    let models = agentModelOptionsCache.get(requestedAgent);
+    if (!Array.isArray(models) || models.length === 0) {
+      modelPickerBtn.disabled = true;
+      modelPickerBtn.textContent = '加载中...';
+      const result = await requestAgentModels(requestedAgent);
+      updateModelControls();
+      if (requestedAgent !== currentAgent || requestedSessionId !== currentSessionId) return;
+      if (!result?.success) {
+        showToast(result?.message || '加载模型列表失败');
+        return;
+      }
+      models = Array.isArray(result.models) ? result.models : [];
+      agentModelOptionsCache.set(requestedAgent, models);
+    }
+
+    const options = buildDynamicModelOptions(requestedAgent, modelControl, models);
+    if (options.length === 0) {
+      showToast(modelControl.emptyText || '未获取到可选模型');
+      return;
+    }
+
+    showOptionPicker(modelControl.title || '选择模型', options, currentModel, (value) => {
+      send({ type: 'message', text: `/model ${value}`, sessionId: requestedSessionId, mode: currentMode, agent: requestedAgent });
+    });
+  }
+
   function updateModelControls() {
     if (!modelPickerBtn || !thinkingPickerBtn) return;
     const hasSession = !!currentSessionId;
@@ -1286,6 +1387,19 @@
       thinkingPickerBtn.title = hasSession
         ? `当前 Thinking 强度: ${codexState.level || '默认'}`
         : `请先打开或创建一个 ${agentSpec.label} 会话`;
+      return;
+    }
+
+    if (modelControl?.kind === 'dynamic') {
+      const currentLabel = String(currentModel || '').trim() || modelControl.emptyLabel || '选择模型';
+      modelPickerBtn.hidden = false;
+      modelPickerBtn.disabled = !hasSession;
+      modelPickerBtn.textContent = currentLabel;
+      modelPickerBtn.title = hasSession
+        ? `当前 ${agentSpec?.label || 'Agent'} 模型: ${String(currentModel || '').trim() || '配置默认模型'}`
+        : `请先打开或创建一个 ${agentSpec?.label || 'Agent'} 会话`;
+      thinkingPickerBtn.hidden = true;
+      thinkingPickerBtn.disabled = true;
       return;
     }
 
@@ -1654,6 +1768,14 @@
 
     ws.onclose = () => {
       clearSessionLoading();
+      for (const [requestId, resolve] of pendingAgentModelRequests) {
+        pendingAgentModelRequests.delete(requestId);
+        resolve({
+          success: false,
+          models: [],
+          message: '连接已断开，请稍后重试',
+        });
+      }
       scheduleReconnect();
     };
     ws.onerror = () => {};
@@ -1922,6 +2044,14 @@
 
       case 'fetch_models_result':
         if (typeof _onFetchModelsResult === 'function') _onFetchModelsResult(msg);
+        break;
+
+      case 'agent_models_result':
+        if (msg.requestId && pendingAgentModelRequests.has(msg.requestId)) {
+          const resolve = pendingAgentModelRequests.get(msg.requestId);
+          pendingAgentModelRequests.delete(msg.requestId);
+          resolve(msg);
+        }
         break;
 
       case 'background_done':
@@ -3099,52 +3229,56 @@
   function showOptionPicker(title, options, currentValue, onSelect) {
     hideOptionPicker();
 
+    const overlay = document.createElement('div');
+    overlay.className = 'option-picker-overlay';
+    overlay.id = 'option-picker-overlay';
+
     const picker = document.createElement('div');
     picker.className = 'option-picker';
     picker.id = 'option-picker';
 
     picker.innerHTML = `
       <div class="option-picker-title">${escapeHtml(title)}</div>
-      ${options.map(opt => `
-        <div class="option-picker-item${opt.value === currentValue ? ' active' : ''}" data-value="${opt.value}">
-          <div class="option-picker-item-info">
-            <div class="option-picker-item-label">${escapeHtml(opt.label)}</div>
-            <div class="option-picker-item-desc">${escapeHtml(opt.desc)}</div>
+      <div class="option-picker-list">
+        ${options.map(opt => `
+          <div class="option-picker-item${opt.value === currentValue ? ' active' : ''}" data-value="${opt.value}">
+            <div class="option-picker-item-info">
+              <div class="option-picker-item-label">${escapeHtml(opt.label)}</div>
+              <div class="option-picker-item-desc">${escapeHtml(opt.desc)}</div>
+            </div>
+            ${opt.value === currentValue ? '<span class="option-picker-item-check">✓</span>' : ''}
           </div>
-          ${opt.value === currentValue ? '<span class="option-picker-item-check">✓</span>' : ''}
-        </div>
-      `).join('')}
+        `).join('')}
+      </div>
     `;
+    overlay.appendChild(picker);
+    document.body.appendChild(overlay);
 
-    const chatMain = document.querySelector('.chat-main');
-    chatMain.appendChild(picker);
+    picker.querySelectorAll('.option-picker-item').forEach(el => {
+      el.addEventListener('click', () => {
+        // Close current picker first so onSelect can safely open a nested picker.
+        const v = el.dataset.value;
+        hideOptionPicker();
+        onSelect(v);
+      });
+    });
 
-	    picker.querySelectorAll('.option-picker-item').forEach(el => {
-	      el.addEventListener('click', () => {
-	        // Close current picker first so onSelect can safely open a nested picker.
-	        const v = el.dataset.value;
-	        hideOptionPicker();
-	        onSelect(v);
-	      });
-	    });
-
-    // Close on outside click (delayed to avoid immediate close)
-    setTimeout(() => {
-      document.addEventListener('click', _pickerOutsideClick);
-    }, 0);
+    overlay.addEventListener('click', _pickerOutsideClick);
     document.addEventListener('keydown', _pickerEscape);
   }
 
   function hideOptionPicker() {
+    const overlay = document.getElementById('option-picker-overlay');
     const picker = document.getElementById('option-picker');
+    if (overlay) overlay.removeEventListener('click', _pickerOutsideClick);
+    if (overlay) overlay.remove();
     if (picker) picker.remove();
-    document.removeEventListener('click', _pickerOutsideClick);
     document.removeEventListener('keydown', _pickerEscape);
   }
 
   function _pickerOutsideClick(e) {
     const picker = document.getElementById('option-picker');
-    if (picker && !picker.contains(e.target)) {
+    if (picker && e.target && e.target.id === 'option-picker-overlay' && !picker.contains(e.target)) {
       hideOptionPicker();
     }
   }
@@ -3158,6 +3292,10 @@
 	  function showModelPicker() {
 	    const modelControl = getAgentModelControl(currentAgent);
 	    if (!modelControl) return;
+	    if (modelControl.kind === 'dynamic') {
+	      showDynamicModelPicker();
+	      return;
+	    }
 	    if (modelControl.kind === 'reasoning') {
 	      const current = _splitCodexThinkingModel(currentModel || '');
 	      const baseOptions = getCodexBaseModelOptions();
