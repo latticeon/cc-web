@@ -4450,6 +4450,37 @@
       modal.querySelector('#claude-info-ok').addEventListener('click', closeModal);
     }
 
+    function showCodexLocalInfoModal() {
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '460px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>Codex 本地配置说明</h3>
+          <button class="settings-close" id="codex-info-close">&times;</button>
+        </div>
+        <div class="settings-inline-note">
+          选中"本地配置"时，CC-Web 会直接复用本机 <code>codex</code> 的登录态与 <code>~/.codex/config.toml</code>，不会覆盖或修改本机文件。
+          <br><br>
+          切换到自定义 Profile 后，只会在 CC-Web 为当前会话准备独立的运行时目录与 API 凭据，不会改写你的本地 Codex 配置。
+          <br><br>
+          切回"本地配置"后会立即恢复本机直通模式，不需要像 Claude 那样手动恢复快照。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="codex-info-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#codex-info-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#codex-info-ok').addEventListener('click', closeModal);
+    }
+
     modelSaveBtn.addEventListener('click', () => {
       const isLocal = modelActiveTemplate === '';
       const config = {
@@ -4569,7 +4600,7 @@
             renderCodexConfigArea();
           }
         });
-        panel.querySelector('#codex-info-btn').addEventListener('click', showClaudeLocalInfoModal);
+        panel.querySelector('#codex-info-btn').addEventListener('click', showCodexLocalInfoModal);
         panel.querySelector('#codex-read-local-btn').addEventListener('click', () => send({ type: 'read_codex_local_config' }));
         return;
       }
