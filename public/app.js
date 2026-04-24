@@ -1989,7 +1989,7 @@
           ? msg.steps
           : buildLegacyAssistantSteps(msg.text || '', msg.toolCalls || []);
         if (streamBubble) {
-          renderAssistantStepsIntoBubble(streamBubble, resumeSteps);
+          renderAssistantStepsIntoBubble(streamBubble, resumeSteps, [], { complete: false, running: true });
         }
         const toolSteps = resumeSteps.filter((step) => step && step.type === 'tool_call');
         toolSteps.forEach((tc) => {
@@ -2134,11 +2134,8 @@
     const msgEl = createMsgElement('assistant', '');
     msgEl.id = 'streaming-msg';
     const bubble = msgEl.querySelector('.msg-bubble');
-    bubble.innerHTML = '';
-    const stepsDiv = document.createElement('div');
-    stepsDiv.className = 'assistant-steps';
-    stepsDiv.appendChild(createAssistantTextStepElement(''));
-    bubble.appendChild(stepsDiv);
+    renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
+    ensureStreamingTextStep(msgEl);
     messagesDiv.appendChild(msgEl);
     scrollToBottom();
   }
@@ -2155,6 +2152,7 @@
     const streamEl = document.getElementById('streaming-msg');
     if (streamEl) {
       removeTrailingEmptyAssistantTextStep(streamEl);
+      updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), { complete: true, running: false });
       streamEl.removeAttribute('id');
     }
 
@@ -2178,6 +2176,7 @@
     const textStep = ensureStreamingTextStep(streamEl);
     if (!textStep) return;
     setAssistantTextStepContent(textStep, pendingText);
+    updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), { complete: false, running: true });
     scrollToBottom();
   }
 
@@ -2189,14 +2188,14 @@
 
   function buildLegacyAssistantSteps(content, toolCalls = []) {
     const steps = [];
-    if (typeof content === 'string' && content.trim()) {
-      steps.push({ type: 'text', content });
-    }
     if (Array.isArray(toolCalls)) {
       toolCalls.forEach((tool) => {
         if (!tool || typeof tool !== 'object') return;
         steps.push({ type: 'tool_call', ...deepClone(tool) });
       });
+    }
+    if (typeof content === 'string' && content.trim()) {
+      steps.push({ type: 'text', content });
     }
     return steps;
   }
@@ -2208,14 +2207,101 @@
     return buildLegacyAssistantSteps(message?.content || '', message?.toolCalls || []);
   }
 
-  function ensureAssistantStepsContainer(bubble) {
-    let stepsDiv = bubble.querySelector('.assistant-steps');
-    if (!stepsDiv) {
-      stepsDiv = document.createElement('div');
-      stepsDiv.className = 'assistant-steps';
-      bubble.appendChild(stepsDiv);
+  function isRenderableAssistantTextStep(step) {
+    return !!(step?.type === 'text' && String(step.content || '').trim());
+  }
+
+  function getRenderableAssistantSteps(steps) {
+    return (Array.isArray(steps) ? steps : []).filter((step) => {
+      if (!step || typeof step !== 'object') return false;
+      if (step.type === 'text') return isRenderableAssistantTextStep(step);
+      return true;
+    });
+  }
+
+  function splitAssistantDisplaySteps(steps) {
+    const items = getRenderableAssistantSteps(steps);
+    if (items.length === 0) return { processSteps: [], finalStep: null };
+    const last = items[items.length - 1];
+    if (isRenderableAssistantTextStep(last)) {
+      return {
+        processSteps: items.slice(0, -1),
+        finalStep: last,
+      };
     }
-    return stepsDiv;
+    return {
+      processSteps: items,
+      finalStep: null,
+    };
+  }
+
+  function ensureAssistantOutputRoot(bubble) {
+    let root = bubble.querySelector('.assistant-output');
+    if (!root) {
+      root = document.createElement('div');
+      root.className = 'assistant-output';
+      bubble.appendChild(root);
+    }
+    return root;
+  }
+
+  function ensureAssistantFinalContainer(bubble) {
+    const root = ensureAssistantOutputRoot(bubble);
+    let finalDiv = root.querySelector('.assistant-final');
+    if (!finalDiv) {
+      finalDiv = document.createElement('div');
+      finalDiv.className = 'assistant-final';
+      root.appendChild(finalDiv);
+    }
+    return finalDiv;
+  }
+
+  function ensureAssistantProcessContainer(bubble) {
+    const root = ensureAssistantOutputRoot(bubble);
+    let details = root.querySelector('.assistant-process');
+    if (!details) {
+      details = document.createElement('details');
+      details.className = 'assistant-process';
+
+      const summary = document.createElement('summary');
+      summary.className = 'assistant-process-summary';
+
+      const main = document.createElement('span');
+      main.className = 'assistant-process-summary-main';
+
+      const label = document.createElement('span');
+      label.className = 'assistant-process-label';
+      main.appendChild(label);
+
+      const meta = document.createElement('span');
+      meta.className = 'assistant-process-meta';
+      main.appendChild(meta);
+
+      const state = document.createElement('span');
+      state.className = 'assistant-process-state';
+
+      summary.appendChild(main);
+      summary.appendChild(state);
+
+      const body = document.createElement('div');
+      body.className = 'assistant-process-body';
+
+      const stepsDiv = document.createElement('div');
+      stepsDiv.className = 'assistant-process-steps assistant-steps';
+      body.appendChild(stepsDiv);
+
+      details.appendChild(summary);
+      details.appendChild(body);
+      root.appendChild(details);
+    }
+
+    return {
+      details,
+      label: details.querySelector('.assistant-process-label'),
+      meta: details.querySelector('.assistant-process-meta'),
+      state: details.querySelector('.assistant-process-state'),
+      stepsDiv: details.querySelector('.assistant-process-steps'),
+    };
   }
 
   function createAssistantTextStepElement(text = '') {
@@ -2242,42 +2328,122 @@
     return step;
   }
 
+  function appendAssistantStepElement(container, step) {
+    if (!container || !step || typeof step !== 'object') return;
+    if (step.type === 'text') {
+      if (!isRenderableAssistantTextStep(step)) return;
+      container.appendChild(createAssistantTextStepElement(step.content));
+      return;
+    }
+    container.appendChild(createAssistantToolStepElement(step));
+  }
+
+  function getAssistantFinalTextStep(bubble) {
+    const finalDiv = bubble ? bubble.querySelector('.assistant-final') : null;
+    const last = finalDiv ? finalDiv.lastElementChild : null;
+    if (last && last.dataset.stepType === 'text') return last;
+    return null;
+  }
+
+  function assistantTextStepHasMeaningfulText(step) {
+    const textDiv = step?.querySelector('.msg-text');
+    return !!(textDiv && textDiv.textContent.trim());
+  }
+
+  function assistantTextStepHasDisplayContent(step) {
+    const textDiv = step?.querySelector('.msg-text');
+    return !!(textDiv && (textDiv.textContent.trim() || textDiv.querySelector('.typing-indicator')));
+  }
+
+  function updateAssistantBubbleLayout(bubble, options = {}) {
+    if (!bubble) return;
+    const finalDiv = ensureAssistantFinalContainer(bubble);
+    const process = ensureAssistantProcessContainer(bubble);
+    const processCount = process.stepsDiv ? process.stepsDiv.childElementCount : 0;
+    const hasProcess = processCount > 0;
+    const hasFinal = Array.from(finalDiv.children).some((child) => assistantTextStepHasDisplayContent(child));
+    const complete = options.complete === true;
+    const running = options.running === true && !complete;
+
+    finalDiv.hidden = !hasFinal;
+    process.details.hidden = !hasProcess;
+    process.details.dataset.state = running ? 'running' : 'done';
+
+    if (hasProcess) {
+      if (process.label) {
+        process.label.textContent = running ? '处理中' : (hasFinal ? '查看过程' : '过程');
+      }
+      if (process.meta) {
+        process.meta.textContent = `${processCount} 步`;
+      }
+      if (process.state) {
+        process.state.textContent = running ? '运行中' : '已完成';
+      }
+      process.details.open = running || !hasFinal;
+    } else {
+      process.details.removeAttribute('open');
+    }
+
+    const root = bubble.querySelector('.assistant-output');
+    if (root) {
+      root.classList.toggle('assistant-output--process-only', hasProcess && !hasFinal);
+    }
+  }
+
   function removeTrailingEmptyAssistantTextStep(streamEl) {
     if (!streamEl) return;
     const bubble = streamEl.querySelector('.msg-bubble');
-    const stepsDiv = bubble ? bubble.querySelector('.assistant-steps') : null;
-    const last = stepsDiv ? stepsDiv.lastElementChild : null;
-    if (!last || last.dataset.stepType !== 'text') return;
-    const textDiv = last.querySelector('.msg-text');
-    if (!textDiv || textDiv.textContent.trim()) return;
+    const last = getAssistantFinalTextStep(bubble);
+    if (!last || assistantTextStepHasMeaningfulText(last)) return;
     last.remove();
+    updateAssistantBubbleLayout(bubble, { complete: false, running: true });
+  }
+
+  function moveStreamingFinalTextToProcess(streamEl) {
+    if (!streamEl) return;
+    const bubble = streamEl.querySelector('.msg-bubble');
+    if (!bubble) return;
+    const last = getAssistantFinalTextStep(bubble);
+    if (!last) return;
+    if (!assistantTextStepHasMeaningfulText(last)) {
+      last.remove();
+      updateAssistantBubbleLayout(bubble, { complete: false, running: true });
+      return;
+    }
+    const process = ensureAssistantProcessContainer(bubble);
+    process.stepsDiv.appendChild(last);
+    updateAssistantBubbleLayout(bubble, { complete: false, running: true });
   }
 
   function ensureStreamingTextStep(streamEl) {
     if (!streamEl) return null;
     const bubble = streamEl.querySelector('.msg-bubble');
     if (!bubble) return null;
-    const stepsDiv = ensureAssistantStepsContainer(bubble);
-    const last = stepsDiv.lastElementChild;
+    const finalDiv = ensureAssistantFinalContainer(bubble);
+    const last = finalDiv.lastElementChild;
     if (last && last.dataset.stepType === 'text') return last;
     const step = createAssistantTextStepElement('');
-    stepsDiv.appendChild(step);
+    finalDiv.appendChild(step);
+    updateAssistantBubbleLayout(bubble, { complete: false, running: true });
     return step;
   }
 
-  function renderAssistantStepsIntoBubble(bubble, steps, attachments = []) {
+  function renderAssistantStepsIntoBubble(bubble, steps, attachments = [], options = {}) {
     if (!bubble) return;
     bubble.innerHTML = '';
-    const stepsDiv = ensureAssistantStepsContainer(bubble);
-    (Array.isArray(steps) ? steps : []).forEach((step) => {
-      if (!step || typeof step !== 'object') return;
-      if (step.type === 'text') {
-        if (!String(step.content || '').trim()) return;
-        stepsDiv.appendChild(createAssistantTextStepElement(step.content));
-        return;
-      }
-      stepsDiv.appendChild(createAssistantToolStepElement(step));
-    });
+    const finalDiv = ensureAssistantFinalContainer(bubble);
+    const process = ensureAssistantProcessContainer(bubble);
+    const { processSteps, finalStep } = splitAssistantDisplaySteps(steps);
+
+    process.stepsDiv.innerHTML = '';
+    processSteps.forEach((step) => appendAssistantStepElement(process.stepsDiv, step));
+
+    finalDiv.innerHTML = '';
+    if (finalStep) {
+      appendAssistantStepElement(finalDiv, finalStep);
+    }
+
+    updateAssistantBubbleLayout(bubble, options);
     if (attachments.length > 0) {
       bubble.insertAdjacentHTML('beforeend', renderAttachmentLabels(attachments));
     }
@@ -2420,7 +2586,7 @@
 	    const el = createMsgElement(m.role, m.role === 'assistant' ? '' : m.content, m.role === 'assistant' ? [] : (m.attachments || []));
 	    if (m.role === 'assistant') {
 	      const bubble = el.querySelector('.msg-bubble');
-	      renderAssistantStepsIntoBubble(bubble, getAssistantMessageSteps(m), m.attachments || []);
+	      renderAssistantStepsIntoBubble(bubble, getAssistantMessageSteps(m), m.attachments || [], { complete: true, running: false });
 	    }
 	    return el;
 	  }
@@ -2749,11 +2915,13 @@
     } else {
       removeTrailingEmptyAssistantTextStep(streamEl);
     }
+    moveStreamingFinalTextToProcess(streamEl);
     const bubble = streamEl.querySelector('.msg-bubble');
     if (!bubble) return;
-    const stepsDiv = ensureAssistantStepsContainer(bubble);
+    const stepsDiv = ensureAssistantProcessContainer(bubble).stepsDiv;
     const tool = { id: toolUseId, name, input, kind, meta, done };
     stepsDiv.appendChild(createAssistantToolStepElement(tool));
+    updateAssistantBubbleLayout(bubble, { complete: false, running: true });
     scrollToBottom();
   }
 

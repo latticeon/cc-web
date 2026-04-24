@@ -1121,6 +1121,16 @@ body.session-loading-active {
   gap: 10px;
   min-width: 0;
 }
+.assistant-output {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.assistant-final[hidden],
+.assistant-process[hidden] {
+  display: none !important;
+}
 .assistant-step {
   min-width: 0;
 }
@@ -1132,6 +1142,82 @@ body.session-loading-active {
 }
 .assistant-step-tool .tool-call {
   margin: 0;
+}
+.assistant-process {
+  border: 1px solid rgba(91, 126, 161, 0.18);
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(247, 244, 238, 0.82), rgba(255, 255, 255, 0.72));
+}
+.assistant-process-summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.68);
+}
+.assistant-process-summary::-webkit-details-marker { display: none; }
+.assistant-process-summary::before {
+  content: '▸';
+  font-size: 11px;
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+.assistant-process[open] > .assistant-process-summary::before {
+  transform: rotate(90deg);
+}
+.assistant-process-summary:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+.assistant-process-summary-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.assistant-process-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+.assistant-process-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.25;
+}
+.assistant-process-state {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: rgba(93, 138, 84, 0.12);
+  color: var(--success);
+}
+.assistant-process[data-state='running'] .assistant-process-state {
+  background: rgba(232, 190, 92, 0.16);
+  color: #9a6f14;
+}
+.assistant-process-body {
+  padding: 0 10px 10px;
+}
+.assistant-process-steps {
+  gap: 8px;
+}
+.assistant-process-steps .assistant-step-text {
+  padding: 10px 12px;
+  border: 1px solid rgba(91, 126, 161, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.78);
+}
+.assistant-output--process-only .assistant-process {
+  margin-top: 0;
 }
 
 /* System messages */
