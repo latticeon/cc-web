@@ -1136,6 +1136,61 @@ function saveSession(session) {
   fs.writeFileSync(sessionPath(session.id), JSON.stringify(session, null, 2));
 }
 
+function normalizeAssistantContent(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function mergeAssistantMessage(target, incoming) {
+  let changed = false;
+  if ((!target.content || !String(target.content).trim()) && incoming.content) {
+    target.content = incoming.content;
+    changed = true;
+  }
+  if ((incoming.toolCalls || []).length > (target.toolCalls || []).length) {
+    target.toolCalls = incoming.toolCalls;
+    changed = true;
+  }
+  if ((incoming.steps || []).length > (target.steps || []).length) {
+    target.steps = incoming.steps;
+    changed = true;
+  }
+  if (!target.timestamp && incoming.timestamp) {
+    target.timestamp = incoming.timestamp;
+    changed = true;
+  }
+  return changed;
+}
+
+function upsertTrailingAssistantMessage(session, message) {
+  if (!session) return { changed: false, appended: false };
+  if (!Array.isArray(session.messages)) session.messages = [];
+
+  const incoming = {
+    role: 'assistant',
+    content: String(message?.content || ''),
+    toolCalls: Array.isArray(message?.toolCalls) ? message.toolCalls : [],
+    steps: Array.isArray(message?.steps) ? message.steps : [],
+    timestamp: message?.timestamp || new Date().toISOString(),
+  };
+  if (!normalizeAssistantContent(incoming.content) && incoming.steps.length === 0 && incoming.toolCalls.length === 0) {
+    return { changed: false, appended: false };
+  }
+
+  const last = session.messages[session.messages.length - 1];
+  if (last?.role === 'assistant') {
+    const sameContent = normalizeAssistantContent(last.content) && normalizeAssistantContent(last.content) === normalizeAssistantContent(incoming.content);
+    if (sameContent) {
+      return {
+        changed: mergeAssistantMessage(last, incoming),
+        appended: false,
+      };
+    }
+  }
+
+  session.messages.push(incoming);
+  return { changed: true, appended: true };
+}
+
 function toIsoTimestamp(value) {
   if (!value) return null;
   const ms = new Date(value).getTime();
@@ -1158,6 +1213,33 @@ function getFileMtimeIso(filePath) {
   } catch {
     return null;
   }
+}
+
+function repairDuplicateAssistantMessages() {
+  try {
+    for (const file of fs.readdirSync(SESSIONS_DIR)) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const session = loadSession(file.slice(0, -5));
+        if (!session || !Array.isArray(session.messages) || session.messages.length < 2) continue;
+        const repaired = [];
+        let changed = false;
+        for (const message of session.messages) {
+          if (message?.role !== 'assistant') {
+            repaired.push(message);
+            continue;
+          }
+          const tempSession = { messages: repaired };
+          const result = upsertTrailingAssistantMessage(tempSession, message);
+          if (!result.appended) changed = true;
+        }
+        if (changed || repaired.length !== session.messages.length) {
+          session.messages = repaired;
+          saveSession(session);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 function modelShortName(fullModel) {
@@ -1212,8 +1294,16 @@ function killProcess(pid, force = false) {
 function cleanRunDir(sessionId) {
   const dir = runDir(sessionId);
   try {
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
-  } catch {}
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    }
+  } catch (error) {
+    plog('WARN', 'run_dir_cleanup_fail', {
+      sessionId: String(sessionId || '').slice(0, 8),
+      dir,
+      error: String(error?.message || error || 'unknown'),
+    });
+  }
 }
 
 function sendSessionList(ws) {
@@ -1577,16 +1667,19 @@ function handleProcessComplete(sessionId, exitCode, signal) {
     }
   }
   if (session && (entry.fullText || (entry.assistantSteps || []).length > 0)) {
-    session.messages.push({
-      role: 'assistant',
+    const saved = upsertTrailingAssistantMessage(session, {
       content: entry.fullText,
       toolCalls: entry.toolCalls || [],
       steps: entry.assistantSteps || [],
       timestamp: new Date().toISOString(),
     });
-    session.updated = new Date().toISOString();
-    if (!entry.ws) session.hasUnread = true;
-    saveSession(session);
+    if (saved.changed) {
+      if (saved.appended) {
+        session.updated = new Date().toISOString();
+        if (!entry.ws) session.hasUnread = true;
+      }
+      saveSession(session);
+    }
   }
 
   if (pendingSlash?.kind === 'compact' && session) {
@@ -1721,7 +1814,7 @@ function recoverProcesses() {
       const agent = getSessionAgent(session);
 
       if (!fs.existsSync(pidPath)) {
-        try { fs.rmSync(dir, { recursive: true }); } catch {}
+        cleanRunDir(sessionId);
         continue;
       }
 
@@ -1757,18 +1850,19 @@ function recoverProcesses() {
             } catch {}
           }
           if (session && (tempEntry.fullText || (tempEntry.assistantSteps || []).length > 0)) {
-            session.messages.push({
-              role: 'assistant',
+            const saved = upsertTrailingAssistantMessage(session, {
               content: tempEntry.fullText,
               toolCalls: tempEntry.toolCalls || [],
               steps: tempEntry.assistantSteps || [],
               timestamp: new Date().toISOString(),
             });
-            session.updated = new Date().toISOString();
-            saveSession(session);
+            if (saved.changed) {
+              if (saved.appended) session.updated = new Date().toISOString();
+              saveSession(session);
+            }
           }
         }
-        try { fs.rmSync(dir, { recursive: true }); } catch {}
+        cleanRunDir(sessionId);
       }
     }
   } catch (err) {
@@ -4534,6 +4628,7 @@ function handleBrowseDirectories(ws, msg) {
 // === Startup ===
 recoverProcesses();
 repairImportedSessionUpdatedAt();
+repairDuplicateAssistantMessages();
 
 // Periodic heartbeat: log active processes status every 60s
 setInterval(() => {
