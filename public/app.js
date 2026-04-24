@@ -94,6 +94,29 @@
         importConfirm: '将解析本地 Codex rollout 历史并导入当前 Web 视图。确认继续？',
       },
     },
+    {
+      id: 'opencode',
+      label: 'OpenCode',
+      avatar: '',
+      default: false,
+      defaults: { initialModel: '' },
+      modelControl: null,
+      import: {
+        enabled: true,
+        requestType: 'list_agent_import_sessions',
+        actionType: 'import_agent_session',
+        payloadFields: ['sessionId'],
+        listStyle: 'flat',
+        buttonLabel: '导入本地 OpenCode 会话',
+        modalTitle: '导入本地 OpenCode 会话',
+        contextTitle: '从 OpenCode 本地历史导入',
+        contextCopy: '读取本地 OpenCode 会话历史，恢复用户消息、助手输出、推理过程与工具调用。',
+        loadingText: '正在加载 OpenCode 本地历史…',
+        emptyText: '未找到本地 OpenCode 会话',
+        reimportConfirm: '已导入过此 OpenCode 会话，重新导入将覆盖已有内容。确认继续？',
+        importConfirm: '将解析本地 OpenCode 会话历史并导入当前 Web 视图。确认继续？',
+      },
+    },
   ];
 
   function normalizeAgentCatalog(rawCatalog) {
@@ -1239,6 +1262,14 @@
     const hasSession = !!currentSessionId;
     const agentSpec = getAgentDefinition(currentAgent);
     const modelControl = agentSpec?.modelControl || null;
+
+    if (!modelControl) {
+      modelPickerBtn.hidden = true;
+      modelPickerBtn.disabled = true;
+      thinkingPickerBtn.hidden = true;
+      thinkingPickerBtn.disabled = true;
+      return;
+    }
 
     if (modelControl?.kind === 'reasoning') {
       const codexState = getCurrentCodexModelState();
@@ -2545,13 +2576,14 @@
     }
     // Default expansion policy:
     // - Always open AskUserQuestion (it is an actionable UI).
-    // - For non-Codex sessions, auto-open in-flight command execution so users can watch output.
-    // - For Codex sessions, keep everything collapsed by default (less noise), including in-flight commands.
+    // - For non coding-agent sessions, auto-open in-flight command execution so users can watch output.
+    // - For Codex/OpenCode sessions, keep everything collapsed by default (less noise), including in-flight commands.
     const agent = normalizeAgent(currentAgent);
     const kind = toolKind(tool);
+    const keepCollapsed = agent === 'codex' || agent === 'opencode';
     if (tool.name === 'AskUserQuestion') {
       details.open = true;
-    } else if (agent !== 'codex' && !done && kind === 'command_execution') {
+    } else if (!keepCollapsed && !done && kind === 'command_execution') {
       details.open = true;
     }
 
@@ -2601,9 +2633,12 @@
   function getDeleteConfirmMessage(agent) {
     const normalized = normalizeAgent(agent);
     if (normalized === 'codex') {
-      return '删除本会话将同步删去本地 Codex rollout 历史与线程记录，不可恢复。确认删除？';
+      return '删除本会话将同步删除本地 Codex rollout 历史与线程记录，不可恢复。确认删除？';
     }
-    return '删除本会话将同步删去本地 Claude 中的会话历史，不可恢复。确认删除？';
+    if (normalized === 'opencode') {
+      return '删除本会话将同步删除本地 OpenCode 会话记录，不可恢复。确认删除？';
+    }
+    return '删除本会话将同步删除本地 Claude 中的会话历史，不可恢复。确认删除？';
   }
 
   function showDeleteConfirm(agent, onConfirm) {
@@ -4599,6 +4634,7 @@
     if (sourceKinds.includes('cc-web')) parts.push('cc-web 已导入');
     if (sourceKinds.includes('claude-native')) parts.push('Claude 未导入');
     if (sourceKinds.includes('codex-rollout')) parts.push('Codex 未导入');
+    if (sourceKinds.includes('opencode-native')) parts.push('OpenCode 未导入');
     if (item.importedCount || item.unimportedCount) {
       const counts = [];
       if (item.importedCount) counts.push(`${item.importedCount} 个已导入`);

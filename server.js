@@ -28,6 +28,15 @@ const PORT = parseInt(process.env.PORT) || 8002;
 const HOST = process.env.HOST || '127.0.0.1';
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
 const CODEX_PATH = process.env.CODEX_PATH || 'codex';
+function resolveDefaultOpencodePath() {
+  if (process.env.OPENCODE_PATH) return process.env.OPENCODE_PATH;
+  if (process.platform !== 'win32') return 'opencode';
+  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
+  const ps1Path = path.join(appData, 'npm', 'opencode.ps1');
+  if (fs.existsSync(ps1Path)) return ps1Path;
+  return 'opencode';
+}
+const OPENCODE_PATH = resolveDefaultOpencodePath();
 const CONFIG_DIR = process.env.CC_WEB_CONFIG_DIR || path.join(__dirname, 'config');
 const SESSIONS_DIR = process.env.CC_WEB_SESSIONS_DIR || path.join(__dirname, 'sessions');
 const PUBLIC_DIR = process.env.CC_WEB_PUBLIC_DIR || path.join(__dirname, 'public');
@@ -546,6 +555,16 @@ let MODEL_MAP = {
 
 function getAgentLabel(agent) {
   return getAgentConfig(agent).label || getAgentConfig(DEFAULT_AGENT).label || 'Agent';
+}
+
+function isUsageMeteredAgent(agent) {
+  const normalized = normalizeAgent(agent);
+  return normalized === 'codex' || normalized === 'opencode';
+}
+
+function usesAgentsMarkdown(agent) {
+  const normalized = normalizeAgent(agent);
+  return normalized === 'codex' || normalized === 'opencode';
 }
 
 function resolveAgentDefaultSessionModel(agent) {
@@ -1270,15 +1289,15 @@ function condenseRuntimeError(raw) {
 }
 
 function formatRuntimeError(agent, raw, context = {}) {
+  const normalizedAgent = normalizeAgent(agent);
+  const agentLabel = getAgentLabel(normalizedAgent);
   const condensed = condenseRuntimeError(raw);
   const exitInfo = typeof context.exitCode === 'number' ? `（退出码 ${context.exitCode}）` : '';
   if (!condensed) {
-    return agent === 'codex'
-      ? `Codex 任务异常结束${exitInfo}，但 CLI 没有返回更多错误信息。`
-      : `Claude 任务异常结束${exitInfo}，但 CLI 没有返回更多错误信息。`;
+    return `${agentLabel} 任务异常结束${exitInfo}，但 CLI 没有返回更多错误信息。`;
   }
 
-  if (agent === 'codex') {
+  if (normalizedAgent === 'codex') {
     if (/ENOENT|not found|No such file/i.test(condensed)) {
       return '找不到 Codex CLI。请检查 Codex 设置里的 CLI 路径，或确认系统 PATH 中可直接运行 `codex`。';
     }
@@ -1303,6 +1322,31 @@ function formatRuntimeError(agent, raw, context = {}) {
     return `Codex 任务失败${exitInfo}：${condensed}`;
   }
 
+  if (normalizedAgent === 'opencode') {
+    if (/ENOENT|not found|No such file/i.test(condensed)) {
+      return '找不到 OpenCode CLI。请检查 OpenCode 设置里的 CLI 路径，或确认系统 PATH 中可直接运行 `opencode`。';
+    }
+    if (/unknown option|unknown flag|Usage:\s*opencode|Command not found/i.test(raw || '')) {
+      return `OpenCode CLI 参数不兼容：${firstMeaningfulLine(condensed)}。建议检查当前 CLI 版本与 cc-web 的参数约定是否匹配。`;
+    }
+    if (/permission denied|EACCES|EPERM/i.test(condensed)) {
+      return 'OpenCode CLI 启动失败：当前环境没有足够权限执行该命令或访问目标目录。';
+    }
+    if (/authentication|unauthorized|forbidden|login|api key|credential|provider/i.test(condensed)) {
+      return 'OpenCode 鉴权失败。请确认本机 OpenCode 已完成提供方登录或 API 配置仍然有效。';
+    }
+    if (/rate limit|quota|billing|credits/i.test(condensed)) {
+      return 'OpenCode 请求被额度或速率限制拦截。请检查账号配额、计费状态或稍后重试。';
+    }
+    if (/network|timed out|timeout|ECONNRESET|ENOTFOUND|TLS|certificate|fetch failed/i.test(condensed)) {
+      return 'OpenCode 运行时网络请求失败。请检查当前网络、代理或证书环境后重试。';
+    }
+    if (/approval|permission|sandbox|dangerously-skip-permissions/i.test(condensed)) {
+      return `OpenCode 当前的权限配置阻止了这次执行：${firstMeaningfulLine(condensed)}`;
+    }
+    return `OpenCode 任务失败${exitInfo}：${condensed}`;
+  }
+
   if (/ENOENT|not found|No such file/i.test(condensed)) {
     return '找不到 Claude CLI。请检查当前环境是否能直接运行 `claude`。';
   }
@@ -1313,32 +1357,34 @@ function formatRuntimeError(agent, raw, context = {}) {
 }
 
 function compactStartMessage(agent) {
-  return agent === 'codex'
-    ? '正在执行 Codex /compact 压缩上下文，请稍候…'
-    : '正在执行 Claude 原生 /compact 压缩上下文，请稍候…';
+  if (agent === 'codex') return '正在执行 Codex /compact 压缩上下文，请稍候…';
+  if (agent === 'opencode') return '正在执行 OpenCode /compact 压缩上下文，请稍候…';
+  return '正在执行 Claude 原生 /compact 压缩上下文，请稍候…';
 }
 
 function compactDoneMessage(agent) {
-  return agent === 'codex'
-    ? '上下文压缩完成。已执行 Codex /compact，下次继续在同一会话发送即可。'
-    : '上下文压缩完成。已按 Claude Code 原生策略执行 /compact，下次继续在同一会话发送即可。';
+  if (agent === 'codex') return '上下文压缩完成。已执行 Codex /compact，下次继续在同一会话发送即可。';
+  if (agent === 'opencode') return '上下文压缩完成。已执行 OpenCode /compact，下次继续在同一会话发送即可。';
+  return '上下文压缩完成。已按 Claude Code 原生策略执行 /compact，下次继续在同一会话发送即可。';
 }
 
 function initStartMessage(agent) {
-  return agent === 'codex'
+  return usesAgentsMarkdown(agent)
     ? '正在分析项目并生成 AGENTS.md ...'
     : '正在分析项目并生成 CLAUDE.md ...';
 }
 
-function buildCodexInitPrompt(cwd) {
-  const targetPath = path.join(cwd || process.cwd(), 'AGENTS.md');
+function buildAgentInitPrompt(agent, cwd) {
+  const normalizedAgent = normalizeAgent(agent);
+  const targetFile = usesAgentsMarkdown(normalizedAgent) ? 'AGENTS.md' : 'CLAUDE.md';
+  const targetPath = path.join(cwd || process.cwd(), targetFile);
   return [
-    'You are running cc-web\'s /init for a Codex session.',
-    'Analyze the current workspace and create or update AGENTS.md at the repository root.',
+    `You are running cc-web's /init for a ${getAgentLabel(normalizedAgent)} session.`,
+    `Analyze the current workspace and create or update ${targetFile} at the repository root.`,
     `The file path to write is: ${targetPath}`,
     'Requirements:',
     '- Actually write the file; do not stop after summarizing in chat.',
-    '- If AGENTS.md already exists, update it in place instead of creating a duplicate.',
+    `- If ${targetFile} already exists, update it in place instead of creating a duplicate.`,
     '- Keep the document concise and practical for future coding agents working in this repo.',
     '- Include the project purpose, key entry points, dev/test commands, important workflows, and repo-specific safety constraints.',
     '- Prefer facts from the actual codebase over README claims when they differ.',
@@ -1347,15 +1393,15 @@ function buildCodexInitPrompt(cwd) {
 }
 
 function compactAutoStartMessage(agent) {
-  return agent === 'codex'
-    ? '检测到上下文达到上限，正在按 Codex /compact 自动压缩，然后继续当前任务…'
-    : '检测到上下文达到上限，正在按 Claude Code 原版策略自动执行 /compact，然后继续当前任务…';
+  if (agent === 'codex') return '检测到上下文达到上限，正在按 Codex /compact 自动压缩，然后继续当前任务…';
+  if (agent === 'opencode') return '检测到上下文达到上限，正在按 OpenCode /compact 自动压缩，然后继续当前任务…';
+  return '检测到上下文达到上限，正在按 Claude Code 原版策略自动执行 /compact，然后继续当前任务…';
 }
 
 function compactAutoResumeMessage(agent) {
-  return agent === 'codex'
-    ? '检测到上一条请求因上下文过大失败，现已按 Codex 压缩计划继续执行。'
-    : '检测到上一条请求因上下文过大失败，现已自动按压缩计划继续执行。';
+  if (agent === 'codex') return '检测到上一条请求因上下文过大失败，现已按 Codex 压缩计划继续执行。';
+  if (agent === 'opencode') return '检测到上一条请求因上下文过大失败，现已按 OpenCode 压缩计划继续执行。';
+  return '检测到上一条请求因上下文过大失败，现已自动按压缩计划继续执行。';
 }
 
 function isContextLimitError(agent, raw) {
@@ -1428,6 +1474,26 @@ function handleProcessComplete(sessionId, exitCode, signal) {
 
   // Save result to session
   const session = loadSession(sessionId);
+  if (session && getSessionAgent(session) === 'opencode' && session.opencodeSessionId) {
+    const latestTurn = getLatestOpencodeAssistantTurn(session.opencodeSessionId);
+    if (latestTurn) {
+      const shouldHydrate = !entry.fullText
+        || (String(latestTurn.content || '').length > String(entry.fullText || '').length)
+        || ((latestTurn.toolCalls || []).length > (entry.toolCalls || []).length);
+      if (shouldHydrate) {
+        entry.fullText = latestTurn.content || '';
+        entry.toolCalls = latestTurn.toolCalls || [];
+        entry.assistantSteps = latestTurn.steps || [];
+      }
+      if (latestTurn.totalUsage) {
+        session.totalUsage = latestTurn.totalUsage;
+        entry.lastUsage = latestTurn.totalUsage;
+      }
+      if (typeof latestTurn.totalCost === 'number' && Number.isFinite(latestTurn.totalCost)) {
+        session.totalCost = latestTurn.totalCost;
+      }
+    }
+  }
   if (session && (entry.fullText || (entry.assistantSteps || []).length > 0)) {
     session.messages.push({
       role: 'assistant',
@@ -2070,7 +2136,7 @@ function handleSaveModelConfig(ws, newConfig) {
       const sessionId = file.slice(0, -5);
       try {
         const session = loadSession(sessionId);
-        if (!session?.model || session.agent === 'codex') continue;
+        if (!session?.model || getSessionAgent(session) !== 'claude') continue;
         const tier = modelToTier.get(session.model);
         if (tier && MODEL_MAP[tier] !== session.model) {
           session.model = MODEL_MAP[tier];
@@ -2324,10 +2390,11 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
 
     case '/model': {
       const modelInput = parts[1];
-      if (agent === 'codex') {
+      if (agent === 'codex' || agent === 'opencode') {
+        const agentLabel = agent === 'codex' ? 'Codex' : 'OpenCode';
         if (!modelInput) {
           const current = session?.model || '配置默认模型';
-          wsSend(ws, { type: 'system_message', message: `当前 Codex 模型: ${current}\n用法: /model <模型名>` });
+          wsSend(ws, { type: 'system_message', message: `当前 ${agentLabel} 模型: ${current}\n用法: /model <模型名>` });
         } else {
           if (session) {
             session.model = modelInput;
@@ -2335,7 +2402,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
             saveSession(session);
           }
           wsSend(ws, { type: 'model_changed', model: modelInput });
-          wsSend(ws, { type: 'system_message', message: `Codex 模型已切换为: ${modelInput}` });
+          wsSend(ws, { type: 'system_message', message: `${agentLabel} 模型已切换为: ${modelInput}` });
         }
       } else if (!modelInput) {
         const current = session?.model ? modelShortName(session.model) || session.model : 'opus (默认)';
@@ -2359,7 +2426,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
     }
 
     case '/cost': {
-      if (agent === 'codex') {
+      if (isUsageMeteredAgent(agent)) {
         const usage = session?.totalUsage || { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
         wsSend(ws, {
           type: 'system_message',
@@ -2383,14 +2450,16 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
       }
       const runtimeId = getRuntimeSessionId(session);
       if (!runtimeId) {
-        wsSend(ws, {
-          type: 'system_message',
-          message: agent === 'codex'
-            ? '当前会话尚未建立 Codex 上下文，暂时无需压缩。'
+      wsSend(ws, {
+        type: 'system_message',
+        message: agent === 'codex'
+          ? '当前会话尚未建立 Codex 上下文，暂时无需压缩。'
+          : agent === 'opencode'
+            ? '当前会话尚未建立 OpenCode 上下文，暂时无需压缩。'
             : '当前会话尚未建立 Claude 上下文，暂时无需压缩。',
-        });
-        break;
-      }
+      });
+      break;
+    }
 
       wsSend(ws, { type: 'system_message', message: compactStartMessage(agent) });
       pendingSlashCommands.set(session.id, { kind: 'compact' });
@@ -2410,7 +2479,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
       wsSend(ws, { type: 'system_message', message: initStartMessage(agent) });
       pendingSlashCommands.set(session.id, { kind: 'init' });
       handleMessage(ws, {
-        text: agent === 'codex' ? buildCodexInitPrompt(session.cwd) : '/init',
+        text: usesAgentsMarkdown(agent) ? buildAgentInitPrompt(agent, session.cwd) : '/init',
         sessionId: session.id,
         mode: session.permissionMode || 'yolo',
       }, { hideInHistory: true });
@@ -2514,7 +2583,9 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         type: 'system_message',
         message: agent === 'codex'
           ? base + '\n/model [名称] — 查看/切换 Codex 模型（自由输入）\n/compact — 执行 Codex /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
-          : base + '\n/model [名称] — 查看/切换模型（opus, sonnet, haiku）\n/compact — 执行 Claude 原生上下文压缩（保留压缩计划并可自动续跑）\n/init — 分析项目并生成/更新 CLAUDE.md',
+          : agent === 'opencode'
+            ? base + '\n/model [名称] — 查看/切换 OpenCode 模型（provider/model）\n/compact — 执行 OpenCode /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
+            : base + '\n/model [名称] — 查看/切换模型（opus, sonnet, haiku）\n/compact — 执行 Claude 原生上下文压缩（保留压缩计划并可自动续跑）\n/init — 分析项目并生成/更新 CLAUDE.md',
       });
       break;
     }
@@ -2761,6 +2832,21 @@ function deleteCodexLocalSession(session) {
   return { removedFiles, removedDbRows };
 }
 
+function deleteOpencodeLocalSession(session) {
+  const opencodeSessionId = String(session?.opencodeSessionId || '').trim();
+  if (!opencodeSessionId) return false;
+  try {
+    const cliSpec = getOpencodeCliSpec(['session', 'delete', opencodeSessionId]);
+    const result = spawnSync(cliSpec.command, cliSpec.args, {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 function handleDeleteSession(ws, sessionId) {
   pendingSlashCommands.delete(sessionId);
   pendingCompactRetries.delete(sessionId);
@@ -2787,6 +2873,13 @@ function handleDeleteSession(ws, sessionId) {
         threadId: session?.codexThreadId || null,
         removedFiles: result.removedFiles,
         removedDbRows: result.removedDbRows,
+      });
+    } else if (sessionAgent === 'opencode') {
+      const removed = deleteOpencodeLocalSession(session);
+      plog('INFO', 'opencode_local_session_deleted', {
+        sessionId: sessionId.slice(0, 8),
+        opencodeSessionId: session?.opencodeSessionId || null,
+        removed,
       });
     } else {
       deleteClaudeLocalSession(session?.claudeSessionId || null);
@@ -2974,7 +3067,7 @@ function handleMessage(ws, msg, options = {}) {
   }
   sendSessionList(ws);
 
-  const spawnSpec = buildSpawnSpec(session, { attachments: resolvedAttachments });
+  const spawnSpec = buildSpawnSpec(session, { attachments: resolvedAttachments, text: textValue });
   if (spawnSpec?.error) {
     return wsSend(ws, { type: 'error', message: spawnSpec.error });
   }
@@ -2987,9 +3080,9 @@ function handleMessage(ws, msg, options = {}) {
   const outputPath = path.join(dir, 'output.jsonl');
   const errorPath = path.join(dir, 'error.log');
 
-  const useStreamJson = isClaudeSession(session) && resolvedAttachments.length > 0;
+  const stdinMode = spawnSpec.stdinMode || ((isClaudeSession(session) && resolvedAttachments.length > 0) ? 'stream-json' : 'file');
 
-  if (useStreamJson) {
+  if (stdinMode === 'stream-json') {
     const content = [];
     if (textValue) content.push({ type: 'text', text: textValue });
     for (const attachment of resolvedAttachments) {
@@ -3010,7 +3103,7 @@ function handleMessage(ws, msg, options = {}) {
         content,
       },
     })}\n`);
-  } else {
+  } else if (stdinMode === 'file') {
     fs.writeFileSync(inputPath, textValue);
   }
 
@@ -3064,11 +3157,13 @@ function handleMessage(ws, msg, options = {}) {
   }
 
   try {
-    if (useStreamJson) {
+    if (stdinMode === 'stream-json') {
       // stream-json requires an open pipe (not a closed file) so Claude doesn't exit on EOF
       stdinSource = 'pipe';
-    } else {
+    } else if (stdinMode === 'file') {
       stdinSource = fs.openSync(inputPath, 'r');
+    } else {
+      stdinSource = 'ignore';
     }
     proc = spawn(spawnSpec.command, spawnSpec.args, {
       env: spawnSpec.env,
@@ -3078,11 +3173,11 @@ function handleMessage(ws, msg, options = {}) {
       windowsHide: true,
     });
     proc.once('error', handleSpawnFailure);
-    if (useStreamJson) {
+    if (stdinMode === 'stream-json') {
       // Write the stream-json message then close stdin so Claude knows input is done
       proc.stdin.write(fs.readFileSync(inputPath));
       proc.stdin.end();
-    } else {
+    } else if (stdinMode === 'file') {
       closeFdQuietly(stdinSource);
       parentInputClosed = true;
     }
@@ -3185,6 +3280,7 @@ const {
   processEnv: process.env,
   CLAUDE_PATH,
   CODEX_PATH,
+  OPENCODE_PATH,
   MODEL_MAP,
   loadModelConfig,
   applyCustomTemplateToSettings,
@@ -3257,6 +3353,7 @@ const CLAUDE_PROJECTS_DIR = path.join(process.env.HOME || process.env.USERPROFIL
 const CODEX_SESSIONS_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'sessions');
 const CODEX_STATE_DB_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'state_5.sqlite');
 const CODEX_LOG_DB_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '', '.codex', 'logs_1.sqlite');
+const OPENCODE_DB_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '', '.local', 'share', 'opencode', 'opencode.db');
 const DIRECTORY_BROWSER_LIMIT = 200;
 
 function resolveClaudeSessionLocalMeta(claudeSessionId) {
@@ -3373,6 +3470,310 @@ function getImportedSessionIds() {
     }
   } catch {}
   return imported;
+}
+
+function canUseSqliteJson() {
+  try {
+    const result = spawnSync('sqlite3', ['-version'], { stdio: 'ignore' });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function readSqliteJsonRows(dbPath, sql) {
+  if (!dbPath || !fs.existsSync(dbPath) || !canUseSqliteJson()) return [];
+  try {
+    const result = spawnSync('sqlite3', ['-json', dbPath, sql], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.status !== 0) return [];
+    const stdout = String(result.stdout || '').trim();
+    if (!stdout) return [];
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function getImportedOpencodeSessionIds() {
+  const imported = new Set();
+  try {
+    for (const f of fs.readdirSync(SESSIONS_DIR).filter((file) => file.endsWith('.json'))) {
+      try {
+        const session = normalizeSession(JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')));
+        if (session.opencodeSessionId) imported.add(session.opencodeSessionId);
+      } catch {}
+    }
+  } catch {}
+  return imported;
+}
+
+function getOpencodeSessionListFromCli() {
+  try {
+    const cliSpec = getOpencodeCliSpec(['session', 'list', '--format', 'json', '--max-count', '200']);
+    const result = spawnSync(cliSpec.command, cliSpec.args, {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.status !== 0) return [];
+    const stdout = String(result.stdout || '').trim();
+    if (!stdout) return [];
+    const parsed = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((row) => ({
+      sessionId: String(row.id || '').trim(),
+      title: String(row.title || '').trim() || String(row.id || '').trim().slice(0, 20),
+      cwd: String(row.directory || '').trim() || null,
+      version: '',
+      updatedAt: row.updated ? new Date(Number(row.updated)).toISOString() : null,
+    })).filter((row) => row.sessionId);
+  } catch {
+    return [];
+  }
+}
+
+function getOpencodeSessionListFromDb() {
+  return readSqliteJsonRows(OPENCODE_DB_PATH, [
+    'SELECT id, title, directory, version, time_updated AS timeUpdated',
+    'FROM session',
+    'WHERE time_archived IS NULL',
+    'ORDER BY time_updated DESC',
+    'LIMIT 200;',
+  ].join(' ')).map((row) => ({
+    sessionId: String(row.id || '').trim(),
+    title: String(row.title || '').trim() || String(row.id || '').trim().slice(0, 20),
+    cwd: String(row.directory || '').trim() || null,
+    version: String(row.version || '').trim(),
+    updatedAt: row.timeUpdated ? new Date(Number(row.timeUpdated)).toISOString() : null,
+  })).filter((row) => row.sessionId);
+}
+
+function getOpencodeSessionList() {
+  const cliItems = getOpencodeSessionListFromCli();
+  if (cliItems.length > 0) return cliItems;
+  return getOpencodeSessionListFromDb();
+}
+
+function getOpencodeCliSpec(args = []) {
+  if (process.platform === 'win32' && /\.ps1$/i.test(OPENCODE_PATH)) {
+    return {
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', OPENCODE_PATH, ...args],
+    };
+  }
+  return { command: OPENCODE_PATH, args };
+}
+
+function loadOpencodeExport(sessionId) {
+  const normalizedId = String(sessionId || '').trim();
+  if (!normalizedId) return null;
+  try {
+    const cliSpec = getOpencodeCliSpec(['export', normalizedId]);
+    const result = spawnSync(cliSpec.command, cliSpec.args, {
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.status !== 0) return null;
+    const stdout = String(result.stdout || '').trim();
+    if (!stdout) return null;
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function getOpencodeModelRef(info) {
+  const provider = String(info?.model?.providerID || info?.providerID || '').trim();
+  const modelId = String(info?.model?.modelID || info?.modelID || '').trim();
+  if (provider && modelId) return `${provider}/${modelId}`;
+  return modelId || provider || null;
+}
+
+function getOpencodeMessageTimestamp(info) {
+  const ts = info?.time?.completed || info?.time?.created || null;
+  return ts ? new Date(Number(ts)).toISOString() : null;
+}
+
+function pushAssistantTextStep(steps, text) {
+  if (!text) return;
+  const last = steps[steps.length - 1];
+  if (last && last.type === 'text') {
+    last.content = `${last.content || ''}${text}`;
+  } else {
+    steps.push({ type: 'text', content: text });
+  }
+}
+
+function buildOpencodeToolCall(part, fallbackId) {
+  const partType = String(part?.type || '').trim().toLowerCase();
+  const id = String(part?.callID || part?.callId || part?.id || fallbackId || '').trim() || `opencode-${Math.random().toString(36).slice(2)}`;
+  if (partType === 'reasoning') {
+    const text = String(part?.text || '');
+    return {
+      type: 'tool_call',
+      name: 'Reasoning',
+      id,
+      kind: 'reasoning',
+      input: null,
+      result: text.slice(0, 2000),
+      done: true,
+      meta: {
+        kind: 'reasoning',
+        title: 'Reasoning',
+        subtitle: text.slice(0, 120),
+        status: null,
+      },
+    };
+  }
+  if (partType === 'patch') {
+    const files = Array.isArray(part?.files) ? part.files : [];
+    return {
+      type: 'tool_call',
+      name: 'Patch',
+      id,
+      kind: 'patch',
+      input: truncateObj({ hash: part?.hash || '', files }, 500),
+      result: files.join('\n').slice(0, 2000),
+      done: true,
+      meta: {
+        kind: 'patch',
+        title: 'Patch',
+        subtitle: files.slice(0, 2).join(', '),
+        status: null,
+      },
+    };
+  }
+  if (partType === 'file') {
+    const filename = String(part?.filename || '');
+    return {
+      type: 'tool_call',
+      name: 'File',
+      id,
+      kind: 'file',
+      input: truncateObj({ filename, mime: part?.mime || '' }, 500),
+      result: String(part?.url || filename || '').slice(0, 2000),
+      done: true,
+      meta: {
+        kind: 'file',
+        title: 'File',
+        subtitle: filename,
+        status: null,
+      },
+    };
+  }
+  const toolName = String(part?.tool || 'Tool');
+  const result = String(part?.state?.output || part?.state?.error || JSON.stringify(truncateObj(part?.state || {}, 1200)) || '').slice(0, 2000);
+  return {
+    type: 'tool_call',
+    name: toolName,
+    id,
+    kind: 'tool',
+    input: sanitizeToolInput(toolName, part?.state?.input || null),
+    result,
+    done: true,
+    meta: {
+      kind: 'tool',
+      title: 'Tool',
+      subtitle: toolName,
+      status: part?.state?.status || null,
+    },
+  };
+}
+
+function parseOpencodeExport(exported) {
+  if (!exported || typeof exported !== 'object') return null;
+  const messages = [];
+  const totalUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+  let totalCost = 0;
+  let model = null;
+
+  for (const message of Array.isArray(exported.messages) ? exported.messages : []) {
+    const info = message?.info || {};
+    const parts = Array.isArray(message?.parts) ? message.parts : [];
+    if (!model) model = getOpencodeModelRef(info);
+
+    if (info.role === 'user') {
+      const content = parts
+        .filter((part) => part && part.type === 'text')
+        .map((part) => part.text || '')
+        .join('');
+      if (content.trim()) {
+        messages.push({
+          role: 'user',
+          content,
+          timestamp: getOpencodeMessageTimestamp(info),
+        });
+      }
+      continue;
+    }
+
+    if (info.role !== 'assistant') continue;
+
+    const steps = [];
+    const toolCalls = [];
+    let content = '';
+    for (const [index, part] of parts.entries()) {
+      const partType = String(part?.type || '').trim().toLowerCase();
+      if (partType === 'text' && part?.text) {
+        content += part.text;
+        pushAssistantTextStep(steps, part.text);
+        continue;
+      }
+      if (!['reasoning', 'tool', 'patch', 'file'].includes(partType)) continue;
+      const toolCall = buildOpencodeToolCall(part, `${info.id || 'msg'}-${index}`);
+      toolCalls.push(toolCall);
+      steps.push(toolCall);
+    }
+
+    if (content.trim() || toolCalls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content,
+        toolCalls,
+        steps,
+        timestamp: getOpencodeMessageTimestamp(info),
+      });
+    }
+
+    const usage = info?.tokens || {};
+    totalUsage.inputTokens += Number(usage.input || 0) || 0;
+    totalUsage.cachedInputTokens += Number(usage.cache?.read || 0) || 0;
+    totalUsage.outputTokens += Number(usage.output || 0) || 0;
+    totalCost += Number(info?.cost || 0) || 0;
+  }
+
+  return {
+    title: String(exported.info?.title || '').trim() || String(exported.info?.id || '').trim().slice(0, 20),
+    cwd: String(exported.info?.directory || '').trim() || null,
+    model,
+    totalUsage,
+    totalCost,
+    messages,
+  };
+}
+
+function getLatestOpencodeAssistantTurn(opencodeSessionId) {
+  const parsed = parseOpencodeExport(loadOpencodeExport(opencodeSessionId));
+  if (!parsed) return null;
+  for (let i = parsed.messages.length - 1; i >= 0; i--) {
+    const message = parsed.messages[i];
+    if (message?.role === 'assistant') {
+      return {
+        content: message.content || '',
+        toolCalls: message.toolCalls || [],
+        steps: message.steps || [],
+        totalUsage: parsed.totalUsage,
+        totalCost: parsed.totalCost,
+      };
+    }
+  }
+  return null;
 }
 
 function sendAgentImportSessions(ws, agent, data) {
@@ -3633,10 +4034,95 @@ function handleImportCodexSession(ws, msg) {
   sendSessionList(ws);
 }
 
+function handleListOpencodeSessions(ws, options = {}) {
+  const imported = getImportedOpencodeSessionIds();
+  const items = getOpencodeSessionList().map((session) => ({
+    sessionId: session.sessionId,
+    title: session.title,
+    cwd: session.cwd,
+    updatedAt: session.updatedAt,
+    version: session.version,
+    alreadyImported: imported.has(session.sessionId),
+  }));
+  if (options.unified) {
+    sendAgentImportSessions(ws, 'opencode', items);
+  } else {
+    wsSend(ws, { type: 'opencode_sessions', sessions: items });
+  }
+}
+
+function handleImportOpencodeSession(ws, msg) {
+  const opencodeSessionId = String(msg?.sessionId || '').trim();
+  if (!opencodeSessionId) {
+    return wsSend(ws, { type: 'error', message: '缺少 sessionId' });
+  }
+
+  const exported = loadOpencodeExport(opencodeSessionId);
+  const parsed = parseOpencodeExport(exported);
+  if (!exported || !parsed) {
+    return wsSend(ws, { type: 'error', message: '无法读取对应的 OpenCode 会话' });
+  }
+
+  let existingSession = null;
+  try {
+    for (const f of fs.readdirSync(SESSIONS_DIR).filter((file) => file.endsWith('.json'))) {
+      try {
+        const session = normalizeSession(JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')));
+        if (session.opencodeSessionId === opencodeSessionId) {
+          existingSession = session;
+          break;
+        }
+      } catch {}
+    }
+  } catch {}
+
+  const id = existingSession ? existingSession.id : crypto.randomUUID();
+  const runtimeField = getRuntimeSessionField('opencode');
+  const session = {
+    id,
+    title: parsed.title || existingSession?.title || opencodeSessionId.slice(0, 20),
+    created: existingSession?.created || new Date().toISOString(),
+    updated: new Date().toISOString(),
+    agent: 'opencode',
+    [runtimeField]: opencodeSessionId,
+    importedFrom: 'opencode',
+    model: parsed.model || existingSession?.model || null,
+    permissionMode: existingSession?.permissionMode || 'yolo',
+    totalCost: parsed.totalCost || existingSession?.totalCost || 0,
+    totalUsage: parsed.totalUsage || existingSession?.totalUsage || { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+    messages: parsed.messages,
+    cwd: parsed.cwd || existingSession?.cwd || null,
+  };
+
+  saveSession(session);
+  wsSessionMap.set(ws, id);
+  wsSend(ws, {
+    type: 'session_info',
+    sessionId: id,
+    messages: session.messages,
+    title: session.title,
+    mode: session.permissionMode,
+    model: sessionModelLabel(session),
+    agent: getSessionAgent(session),
+    cwd: session.cwd,
+    totalCost: session.totalCost || 0,
+    totalUsage: session.totalUsage || null,
+    updated: session.updated,
+    hasUnread: false,
+    historyPending: false,
+    isRunning: false,
+    taskMode: session.taskMode || 'local',
+    sshHostId: session.sshHostId || '',
+    remoteCwd: session.remoteCwd || '',
+  });
+  sendSessionList(ws);
+}
+
 function handleListAgentImportSessions(ws, msg) {
   const agent = normalizeAgent(msg?.agent);
   if (agent === 'codex') return handleListCodexSessions(ws, { unified: true });
   if (agent === 'claude') return handleListNativeSessions(ws, { unified: true });
+  if (agent === 'opencode') return handleListOpencodeSessions(ws, { unified: true });
   wsSend(ws, { type: 'error', message: `当前 agent 暂不支持导入: ${agent}` });
 }
 
@@ -3644,6 +4130,7 @@ function handleImportAgentSession(ws, msg) {
   const agent = normalizeAgent(msg?.agent);
   if (agent === 'codex') return handleImportCodexSession(ws, msg);
   if (agent === 'claude') return handleImportNativeSession(ws, msg);
+  if (agent === 'opencode') return handleImportOpencodeSession(ws, msg);
   wsSend(ws, { type: 'error', message: `当前 agent 暂不支持导入: ${agent}` });
 }
 
@@ -3748,7 +4235,7 @@ function collectCwdSuggestionItems(agent) {
         }
       }
     } catch {}
-  } else {
+  } else if (targetAgent === 'codex') {
     const imported = getImportedCodexThreadIds();
     const seen = new Set();
     for (const filePath of getCodexRolloutFiles()) {
@@ -3761,6 +4248,17 @@ function collectCwdSuggestionItems(agent) {
         updatedAt: parsed.meta.updatedAt || null,
         imported: false,
         sourceKind: 'codex-rollout',
+      });
+    }
+  } else if (targetAgent === 'opencode') {
+    const imported = getImportedOpencodeSessionIds();
+    for (const session of getOpencodeSessionList()) {
+      if (imported.has(session.sessionId)) continue;
+      addCwdSuggestion(items, session.cwd, {
+        title: session.title || session.sessionId.slice(0, 20),
+        updatedAt: session.updatedAt || null,
+        imported: false,
+        sourceKind: 'opencode-native',
       });
     }
   }
