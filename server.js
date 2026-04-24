@@ -443,26 +443,67 @@ function generateRandomPassword(length = 12) {
   return result;
 }
 
+function buildHashedAuthConfig(password, mustChange = false) {
+  const passwordSalt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.scryptSync(String(password || ''), passwordSalt, 64).toString('hex');
+  return {
+    passwordAlgorithm: 'scrypt',
+    passwordSalt,
+    passwordHash,
+    mustChange: !!mustChange,
+  };
+}
+
+function verifyPassword(password, config) {
+  const candidate = String(password || '');
+  const auth = config && typeof config === 'object' ? config : null;
+  if (!auth) return false;
+
+  if (auth.passwordHash && auth.passwordSalt) {
+    try {
+      const actual = crypto.scryptSync(candidate, String(auth.passwordSalt), 64);
+      const expected = Buffer.from(String(auth.passwordHash), 'hex');
+      return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+    } catch {
+      return false;
+    }
+  }
+
+  return typeof auth.password === 'string' && candidate === auth.password;
+}
+
 function loadAuthConfig() {
   // Priority 1: config/auth.json exists with password
   try {
     if (fs.existsSync(AUTH_CONFIG_PATH)) {
       const config = JSON.parse(fs.readFileSync(AUTH_CONFIG_PATH, 'utf8'));
-      if (config.password) return config;
+      if (config.passwordHash && config.passwordSalt) {
+        return {
+          passwordAlgorithm: String(config.passwordAlgorithm || 'scrypt'),
+          passwordSalt: String(config.passwordSalt),
+          passwordHash: String(config.passwordHash),
+          mustChange: !!config.mustChange,
+        };
+      }
+      if (config.password) {
+        const migrated = buildHashedAuthConfig(config.password, !!config.mustChange);
+        saveAuthConfig(migrated);
+        return migrated;
+      }
     }
   } catch {}
 
   // Priority 2: .env has CC_WEB_PASSWORD → migrate
   const envPw = process.env.CC_WEB_PASSWORD;
   if (envPw && envPw !== 'changeme') {
-    const config = { password: envPw, mustChange: false };
+    const config = buildHashedAuthConfig(envPw, false);
     saveAuthConfig(config);
     return config;
   }
 
   // Priority 3: Generate random password
   const pw = generateRandomPassword(12);
-  const config = { password: pw, mustChange: true };
+  const config = buildHashedAuthConfig(pw, true);
   saveAuthConfig(config);
   console.log('========================================');
   console.log('  自动生成初始密码: ' + pw);
@@ -491,7 +532,6 @@ function validatePasswordStrength(pw) {
 }
 
 let authConfig = loadAuthConfig();
-let PASSWORD = authConfig.password;
 
 const activeTokens = new Set();
 
@@ -2189,7 +2229,7 @@ wss.on('connection', (ws, req) => {
         ws.close();
         return;
       }
-      if (msg.password === PASSWORD || (msg.token && activeTokens.has(msg.token))) {
+      if ((msg.password && verifyPassword(msg.password, authConfig)) || (msg.token && activeTokens.has(msg.token))) {
         authToken = msg.token && activeTokens.has(msg.token) ? msg.token : crypto.randomBytes(32).toString('hex');
         activeTokens.add(authToken);
         authenticated = true;
@@ -2379,7 +2419,7 @@ function handleChangePassword(ws, msg, currentToken) {
   const { currentPassword, newPassword } = msg;
 
   // Validate current password
-  if (currentPassword !== PASSWORD) {
+  if (!verifyPassword(currentPassword, authConfig)) {
     return wsSend(ws, { type: 'password_changed', success: false, message: '当前密码错误' });
   }
 
@@ -2390,9 +2430,8 @@ function handleChangePassword(ws, msg, currentToken) {
   }
 
   // Save new password
-  authConfig = { password: newPassword, mustChange: false };
+  authConfig = buildHashedAuthConfig(newPassword, false);
   saveAuthConfig(authConfig);
-  PASSWORD = newPassword;
   plog('INFO', 'password_changed', {});
 
   // Clear all tokens (force all sessions to re-login)

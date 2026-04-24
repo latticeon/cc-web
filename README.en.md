@@ -94,7 +94,7 @@ Settings are stored in `config/notify.json`. Tokens are masked in UI display.
 
 ### Password Management
 
-Passwords are stored in `config/auth.json` and support generation + UI updates:
+Passwords are stored as hashes in `config/auth.json` and support generation + UI updates:
 
 - **First startup** (no password in `.env` and no `auth.json`): auto-generates a random 12-character password, prints it to console, and requires password reset on first login.
 - **Migration from `.env`**: if `CC_WEB_PASSWORD` is already set, it is migrated to `auth.json` automatically at startup.

@@ -99,7 +99,7 @@ copy .env.example .env  & REM 可选
 
 ### 密码管理
 
-密码存储在 `config/auth.json`，支持自动生成与 Web UI 修改：
+密码以哈希形式存储在 `config/auth.json`，支持自动生成与 Web UI 修改：
 
 - **首次启动**（无 `.env` 密码、无 `auth.json`）：自动生成 12 位随机密码，打印到控制台，首次登录强制修改
 - **从 `.env` 迁移**：如已在 `.env` 设置 `CC_WEB_PASSWORD`，启动时自动迁移到 `auth.json`，无需改密
