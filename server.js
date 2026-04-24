@@ -621,7 +621,7 @@ function resolveAgentDefaultSessionModel(agent) {
     return MODEL_MAP[spec.key] || null;
   }
   if (spec.source === 'kimi-config-default') {
-    return readKimiModelCatalog().defaultModel || null;
+    return readKimiModelCatalog().defaultModel || getLatestKnownSessionModel('kimi') || null;
   }
   if (spec.source === 'literal') {
     return spec.value || null;
@@ -649,6 +649,29 @@ function loadOpencodeConfigFile() {
   }
 }
 
+function getLatestKnownSessionModel(agent) {
+  const targetAgent = normalizeAgent(agent);
+  let latestModel = null;
+  let latestTime = -1;
+  try {
+    for (const file of fs.readdirSync(SESSIONS_DIR).filter((entry) => entry.endsWith('.json'))) {
+      try {
+        const session = normalizeSession(JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, file), 'utf8')));
+        if (getSessionAgent(session) !== targetAgent) continue;
+        const model = String(session?.model || '').trim();
+        if (!model) continue;
+        const updatedAt = new Date(session?.updated || session?.created || 0).getTime();
+        if (!Number.isFinite(updatedAt)) continue;
+        if (updatedAt > latestTime) {
+          latestTime = updatedAt;
+          latestModel = model;
+        }
+      } catch {}
+    }
+  } catch {}
+  return latestModel;
+}
+
 function resolveOpencodeConfiguredModel(config) {
   const cfg = config || loadOpencodeConfigFile();
   if (!cfg || typeof cfg !== 'object') return null;
@@ -669,14 +692,20 @@ function resolveOpencodeDefaultModel() {
   const configured = resolveOpencodeConfiguredModel();
   if (configured) return configured;
 
+  const recentKnownModel = getLatestKnownSessionModel('opencode');
+  if (recentKnownModel) return recentKnownModel;
+
   try {
-    const latestSession = getOpencodeSessionList()[0] || null;
-    if (!latestSession?.sessionId) return null;
-    const parsed = parseOpencodeExport(loadOpencodeExport(latestSession.sessionId));
-    return String(parsed?.model || '').trim() || null;
+    for (const session of getOpencodeSessionList().slice(0, 10)) {
+      if (!session?.sessionId) continue;
+      const parsed = parseOpencodeExport(loadOpencodeExport(session.sessionId));
+      const model = String(parsed?.model || '').trim();
+      if (model) return model;
+    }
   } catch {
     return null;
   }
+  return null;
 }
 
 // === Model Config ===
