@@ -1136,6 +1136,30 @@ function saveSession(session) {
   fs.writeFileSync(sessionPath(session.id), JSON.stringify(session, null, 2));
 }
 
+function toIsoTimestamp(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function pickFirstValidIsoTimestamp(...values) {
+  for (const value of values) {
+    const iso = toIsoTimestamp(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function getFileMtimeIso(filePath) {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    return fs.statSync(filePath).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
 function modelShortName(fullModel) {
   if (!fullModel) return null;
   const entry = Object.entries(MODEL_MAP).find(([, v]) => v === fullModel);
@@ -1354,6 +1378,64 @@ function formatRuntimeError(agent, raw, context = {}) {
     return 'Claude 鉴权失败。请确认本机 Claude CLI 已完成登录，且凭据仍然有效。';
   }
   return `Claude 任务失败${exitInfo}：${condensed}`;
+}
+
+function getImportedSourceUpdatedAt(session, context = {}) {
+  const normalized = normalizeSession(session);
+  const agent = getSessionAgent(normalized);
+
+  if (agent === 'claude' && normalized.claudeSessionId) {
+    const directPath = normalized.importedFrom
+      ? path.join(CLAUDE_PROJECTS_DIR, String(normalized.importedFrom), `${sanitizeId(normalized.claudeSessionId)}.jsonl`)
+      : null;
+    const localPath = directPath && fs.existsSync(directPath)
+      ? directPath
+      : resolveClaudeSessionLocalMeta(normalized.claudeSessionId)?.filePath;
+    return getFileMtimeIso(localPath);
+  }
+
+  if (agent === 'codex') {
+    return getFileMtimeIso(normalized.importedRolloutPath);
+  }
+
+  if (agent === 'opencode' && normalized.opencodeSessionId) {
+    const map = context.opencodeUpdatedAtById;
+    return pickFirstValidIsoTimestamp(map?.get(normalized.opencodeSessionId));
+  }
+
+  return null;
+}
+
+function repairImportedSessionUpdatedAt() {
+  let opencodeUpdatedAtById = null;
+  const getOpencodeUpdatedAtById = () => {
+    if (opencodeUpdatedAtById) return opencodeUpdatedAtById;
+    opencodeUpdatedAtById = new Map(
+      getOpencodeSessionList()
+        .filter((item) => item?.sessionId)
+        .map((item) => [item.sessionId, item.updatedAt || null])
+    );
+    return opencodeUpdatedAtById;
+  };
+
+  try {
+    for (const file of fs.readdirSync(SESSIONS_DIR)) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const session = loadSession(file.slice(0, -5));
+        if (!session) continue;
+        const needsOpencodeMap = getSessionAgent(session) === 'opencode' && !!session.opencodeSessionId;
+        const sourceUpdatedAt = getImportedSourceUpdatedAt(session, {
+          opencodeUpdatedAtById: needsOpencodeMap ? getOpencodeUpdatedAtById() : null,
+        });
+        const nextUpdatedAt = pickFirstValidIsoTimestamp(sourceUpdatedAt, session.updated, session.created);
+        if (nextUpdatedAt && nextUpdatedAt !== session.updated) {
+          session.updated = nextUpdatedAt;
+          saveSession(session);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 function compactStartMessage(agent) {
@@ -3760,11 +3842,14 @@ function parseOpencodeExport(exported) {
   const totalUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
   let totalCost = 0;
   let model = null;
+  let updatedAt = null;
 
   for (const message of Array.isArray(exported.messages) ? exported.messages : []) {
     const info = message?.info || {};
     const parts = Array.isArray(message?.parts) ? message.parts : [];
     if (!model) model = getOpencodeModelRef(info);
+    const messageTs = getOpencodeMessageTimestamp(info);
+    if (messageTs) updatedAt = messageTs;
 
     if (info.role === 'user') {
       const content = parts
@@ -3775,7 +3860,7 @@ function parseOpencodeExport(exported) {
         messages.push({
           role: 'user',
           content,
-          timestamp: getOpencodeMessageTimestamp(info),
+          timestamp: messageTs,
         });
       }
       continue;
@@ -3805,7 +3890,7 @@ function parseOpencodeExport(exported) {
         content,
         toolCalls,
         steps,
-        timestamp: getOpencodeMessageTimestamp(info),
+        timestamp: messageTs,
       });
     }
 
@@ -3819,6 +3904,7 @@ function parseOpencodeExport(exported) {
   return {
     title: String(exported.info?.title || '').trim() || String(exported.info?.id || '').trim().slice(0, 20),
     cwd: String(exported.info?.directory || '').trim() || null,
+    updatedAt,
     model,
     totalUsage,
     totalCost,
@@ -3961,7 +4047,7 @@ function handleImportNativeSession(ws, msg) {
     id,
     title,
     created: existingSession?.created || new Date().toISOString(),
-    updated: new Date().toISOString(),
+    updated: pickFirstValidIsoTimestamp(getFileMtimeIso(filePath), existingSession?.updated, existingSession?.created) || new Date().toISOString(),
     agent: 'claude',
     [runtimeField]: sessionId,
     importedFrom: projectDir,
@@ -4065,7 +4151,7 @@ function handleImportCodexSession(ws, msg) {
     id,
     title: parsed.meta.title || existingSession?.title || threadId.slice(0, 20),
     created: existingSession?.created || new Date().toISOString(),
-    updated: new Date().toISOString(),
+    updated: pickFirstValidIsoTimestamp(parsed.meta.updatedAt, getFileMtimeIso(parsed.filePath), existingSession?.updated, existingSession?.created) || new Date().toISOString(),
     agent: 'codex',
     [runtimeField]: threadId,
     importedFrom: 'codex',
@@ -4150,7 +4236,7 @@ function handleImportOpencodeSession(ws, msg) {
     id,
     title: parsed.title || existingSession?.title || opencodeSessionId.slice(0, 20),
     created: existingSession?.created || new Date().toISOString(),
-    updated: new Date().toISOString(),
+    updated: pickFirstValidIsoTimestamp(parsed.updatedAt, existingSession?.updated, existingSession?.created) || new Date().toISOString(),
     agent: 'opencode',
     [runtimeField]: opencodeSessionId,
     importedFrom: 'opencode',
@@ -4447,6 +4533,7 @@ function handleBrowseDirectories(ws, msg) {
 
 // === Startup ===
 recoverProcesses();
+repairImportedSessionUpdatedAt();
 
 // Periodic heartbeat: log active processes status every 60s
 setInterval(() => {
