@@ -2805,6 +2805,8 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         type: 'system_message',
         message: agent === 'codex'
           ? '当前会话尚未建立 Codex 上下文，暂时无需压缩。'
+          : agent === 'kimi'
+            ? '当前会话尚未建立 Kimi 上下文，暂时无需压缩。'
           : agent === 'opencode'
             ? '当前会话尚未建立 OpenCode 上下文，暂时无需压缩。'
             : '当前会话尚未建立 Claude 上下文，暂时无需压缩。',
@@ -2934,6 +2936,8 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         type: 'system_message',
         message: agent === 'codex'
           ? base + '\n/model [名称] — 查看/切换 Codex 模型（自由输入）\n/compact — 执行 Codex /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
+          : agent === 'kimi'
+            ? base + '\n/model [名称] — 查看/切换 Kimi 模型（自由输入）\n/compact — 执行 Kimi /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
           : agent === 'opencode'
             ? base + '\n/model [名称] — 查看/切换 OpenCode 模型（provider/model）\n/compact — 执行 OpenCode /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
             : base + '\n/model [名称] — 查看/切换模型（opus, sonnet, haiku）\n/compact — 执行 Claude 原生上下文压缩（保留压缩计划并可自动续跑）\n/init — 分析项目并生成/更新 CLAUDE.md',
