@@ -27,7 +27,42 @@ if (fs.existsSync(envPath)) {
 const PORT = parseInt(process.env.PORT) || 8002;
 const HOST = process.env.HOST || '127.0.0.1';
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
-const CODEX_PATH = process.env.CODEX_PATH || 'codex';
+function isConfiguredCliPathUsable(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return false;
+  const looksLikePath = /[\\/]/.test(value) || /\.[a-z0-9]+$/i.test(value) || path.isAbsolute(value);
+  if (!looksLikePath) return true;
+  try {
+    return fs.existsSync(value);
+  } catch {
+    return false;
+  }
+}
+function resolveDefaultCodexPath() {
+  if (isConfiguredCliPathUsable(process.env.CODEX_PATH)) return process.env.CODEX_PATH;
+  if (process.platform !== 'win32') return 'codex';
+  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
+  const cmdPath = path.join(appData, 'npm', 'codex.cmd');
+  if (fs.existsSync(cmdPath)) return cmdPath;
+
+  try {
+    const userProfile = process.env.USERPROFILE || '';
+    const extRoot = path.join(userProfile, '.vscode', 'extensions');
+    if (extRoot && fs.existsSync(extRoot)) {
+      const candidates = fs.readdirSync(extRoot)
+        .filter((name) => /^openai\.chatgpt-/i.test(name))
+        .sort()
+        .reverse();
+      for (const name of candidates) {
+        const exePath = path.join(extRoot, name, 'bin', 'windows-x86_64', 'codex.exe');
+        if (fs.existsSync(exePath)) return exePath;
+      }
+    }
+  } catch {}
+
+  return 'codex';
+}
+const CODEX_PATH = resolveDefaultCodexPath();
 function resolveDefaultKimiPath() {
   if (process.env.KIMI_PATH) return process.env.KIMI_PATH;
   if (process.platform !== 'win32') return 'kimi';

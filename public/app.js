@@ -2245,6 +2245,18 @@
     return root;
   }
 
+  function normalizeAssistantOutputOrder(root) {
+    if (!root) return;
+    const processDetails = root.querySelector('.assistant-process');
+    const finalDiv = root.querySelector('.assistant-final');
+    if (processDetails && root.firstElementChild !== processDetails) {
+      root.insertBefore(processDetails, root.firstChild);
+    }
+    if (finalDiv && processDetails && finalDiv.previousElementSibling !== processDetails) {
+      root.insertBefore(finalDiv, processDetails.nextElementSibling);
+    }
+  }
+
   function ensureAssistantFinalContainer(bubble) {
     const root = ensureAssistantOutputRoot(bubble);
     let finalDiv = root.querySelector('.assistant-final');
@@ -2253,6 +2265,7 @@
       finalDiv.className = 'assistant-final';
       root.appendChild(finalDiv);
     }
+    normalizeAssistantOutputOrder(root);
     return finalDiv;
   }
 
@@ -2294,6 +2307,8 @@
       details.appendChild(body);
       root.appendChild(details);
     }
+
+    normalizeAssistantOutputOrder(root);
 
     return {
       details,
@@ -2355,15 +2370,37 @@
     return !!(textDiv && (textDiv.textContent.trim() || textDiv.querySelector('.typing-indicator')));
   }
 
+  function promoteProcessTextStepsToFinalIfNeeded(bubble, options = {}) {
+    if (!bubble) return;
+    const complete = options.complete === true;
+    const running = options.running === true && !complete;
+    if (running) return;
+
+    const finalDiv = options.finalDiv || ensureAssistantFinalContainer(bubble);
+    const process = options.process || ensureAssistantProcessContainer(bubble);
+    const hasFinal = Array.from(finalDiv.children).some((child) => assistantTextStepHasDisplayContent(child));
+    if (hasFinal) return;
+
+    const textSteps = Array.from(process.stepsDiv.children).filter((child) =>
+      child?.dataset?.stepType === 'text' && assistantTextStepHasMeaningfulText(child)
+    );
+    if (textSteps.length === 0) return;
+
+    textSteps.forEach((step) => finalDiv.appendChild(step));
+  }
+
   function updateAssistantBubbleLayout(bubble, options = {}) {
     if (!bubble) return;
     const finalDiv = ensureAssistantFinalContainer(bubble);
     const process = ensureAssistantProcessContainer(bubble);
+    const complete = options.complete === true;
+    const running = options.running === true && !complete;
+
+    promoteProcessTextStepsToFinalIfNeeded(bubble, { complete, running, finalDiv, process });
+
     const processCount = process.stepsDiv ? process.stepsDiv.childElementCount : 0;
     const hasProcess = processCount > 0;
     const hasFinal = Array.from(finalDiv.children).some((child) => assistantTextStepHasDisplayContent(child));
-    const complete = options.complete === true;
-    const running = options.running === true && !complete;
 
     finalDiv.hidden = !hasFinal;
     process.details.hidden = !hasProcess;
@@ -2386,6 +2423,7 @@
 
     const root = bubble.querySelector('.assistant-output');
     if (root) {
+      normalizeAssistantOutputOrder(root);
       root.classList.toggle('assistant-output--process-only', hasProcess && !hasFinal);
     }
   }
