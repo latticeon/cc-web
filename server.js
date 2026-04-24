@@ -28,6 +28,15 @@ const PORT = parseInt(process.env.PORT) || 8002;
 const HOST = process.env.HOST || '127.0.0.1';
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
 const CODEX_PATH = process.env.CODEX_PATH || 'codex';
+function resolveDefaultKimiPath() {
+  if (process.env.KIMI_PATH) return process.env.KIMI_PATH;
+  if (process.platform !== 'win32') return 'kimi';
+  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
+  const cmdPath = path.join(appData, 'npm', 'kimi.cmd');
+  if (fs.existsSync(cmdPath)) return cmdPath;
+  return 'kimi';
+}
+const KIMI_PATH = resolveDefaultKimiPath();
 function resolveDefaultOpencodePath() {
   if (process.env.OPENCODE_PATH) return process.env.OPENCODE_PATH;
   if (process.platform !== 'win32') return 'opencode';
@@ -564,7 +573,7 @@ function isUsageMeteredAgent(agent) {
 
 function usesAgentsMarkdown(agent) {
   const normalized = normalizeAgent(agent);
-  return normalized === 'codex' || normalized === 'opencode';
+  return normalized === 'codex' || normalized === 'kimi' || normalized === 'opencode';
 }
 
 function resolveAgentDefaultSessionModel(agent) {
@@ -572,6 +581,9 @@ function resolveAgentDefaultSessionModel(agent) {
   if (!spec) return null;
   if (spec.source === 'model-map') {
     return MODEL_MAP[spec.key] || null;
+  }
+  if (spec.source === 'kimi-config-default') {
+    return readKimiModelCatalog().defaultModel || null;
   }
   if (spec.source === 'literal') {
     return spec.value || null;
@@ -1461,6 +1473,31 @@ function formatRuntimeError(agent, raw, context = {}) {
     return `OpenCode 任务失败${exitInfo}：${condensed}`;
   }
 
+  if (normalizedAgent === 'kimi') {
+    if (/ENOENT|not found|No such file/i.test(condensed)) {
+      return '找不到 Kimi CLI。请检查当前环境是否能直接运行 `kimi`，或在 `.env` 中配置 `KIMI_PATH`。';
+    }
+    if (/unknown option|unknown flag|Usage:\s*kimi|unexpected argument/i.test(raw || '')) {
+      return `Kimi CLI 参数不兼容：${firstMeaningfulLine(condensed)}。建议检查当前 CLI 版本与 cc-web 的参数约定是否匹配。`;
+    }
+    if (/permission denied|EACCES|EPERM/i.test(condensed)) {
+      return 'Kimi CLI 启动失败：当前环境没有足够权限执行该命令或访问目标目录。';
+    }
+    if (/authentication|unauthorized|forbidden|login|api key|credential|token/i.test(condensed)) {
+      return 'Kimi 鉴权失败。请确认本机 Kimi CLI 已完成登录，或当前 API / token 配置仍然有效。';
+    }
+    if (/rate limit|quota|billing|credits/i.test(condensed)) {
+      return 'Kimi 请求被额度或速率限制拦截。请检查账号配额、计费状态或稍后重试。';
+    }
+    if (/network|timed out|timeout|ECONNRESET|ENOTFOUND|TLS|certificate|fetch failed/i.test(condensed)) {
+      return 'Kimi 运行时网络请求失败。请检查当前网络、代理或证书环境后重试。';
+    }
+    if (/plan mode|approval|permission|yolo/i.test(condensed)) {
+      return `Kimi 当前的执行模式阻止了这次任务：${firstMeaningfulLine(condensed)}`;
+    }
+    return `Kimi 任务失败${exitInfo}：${condensed}`;
+  }
+
   if (/ENOENT|not found|No such file/i.test(condensed)) {
     return '找不到 Claude CLI。请检查当前环境是否能直接运行 `claude`。';
   }
@@ -1530,12 +1567,14 @@ function repairImportedSessionUpdatedAt() {
 
 function compactStartMessage(agent) {
   if (agent === 'codex') return '正在执行 Codex /compact 压缩上下文，请稍候…';
+  if (agent === 'kimi') return '正在执行 Kimi /compact 压缩上下文，请稍候…';
   if (agent === 'opencode') return '正在执行 OpenCode /compact 压缩上下文，请稍候…';
   return '正在执行 Claude 原生 /compact 压缩上下文，请稍候…';
 }
 
 function compactDoneMessage(agent) {
   if (agent === 'codex') return '上下文压缩完成。已执行 Codex /compact，下次继续在同一会话发送即可。';
+  if (agent === 'kimi') return '上下文压缩完成。已执行 Kimi /compact，下次继续在同一会话发送即可。';
   if (agent === 'opencode') return '上下文压缩完成。已执行 OpenCode /compact，下次继续在同一会话发送即可。';
   return '上下文压缩完成。已按 Claude Code 原生策略执行 /compact，下次继续在同一会话发送即可。';
 }
@@ -1566,12 +1605,14 @@ function buildAgentInitPrompt(agent, cwd) {
 
 function compactAutoStartMessage(agent) {
   if (agent === 'codex') return '检测到上下文达到上限，正在按 Codex /compact 自动压缩，然后继续当前任务…';
+  if (agent === 'kimi') return '检测到上下文达到上限，正在按 Kimi /compact 自动压缩，然后继续当前任务…';
   if (agent === 'opencode') return '检测到上下文达到上限，正在按 OpenCode /compact 自动压缩，然后继续当前任务…';
   return '检测到上下文达到上限，正在按 Claude Code 原版策略自动执行 /compact，然后继续当前任务…';
 }
 
 function compactAutoResumeMessage(agent) {
   if (agent === 'codex') return '检测到上一条请求因上下文过大失败，现已按 Codex 压缩计划继续执行。';
+  if (agent === 'kimi') return '检测到上一条请求因上下文过大失败，现已按 Kimi 压缩计划继续执行。';
   if (agent === 'opencode') return '检测到上一条请求因上下文过大失败，现已按 OpenCode 压缩计划继续执行。';
   return '检测到上一条请求因上下文过大失败，现已自动按压缩计划继续执行。';
 }
@@ -2530,6 +2571,18 @@ function handleListAgentModels(ws, msg) {
   const agent = normalizeAgent(msg?.agent);
   const requestId = String(msg?.requestId || '').trim() || null;
 
+  if (agent === 'kimi') {
+    const result = listKimiModels();
+    return wsSend(ws, {
+      type: 'agent_models_result',
+      agent,
+      requestId,
+      success: !!result.success,
+      models: result.models || [],
+      message: result.message || '',
+    });
+  }
+
   if (agent === 'opencode') {
     const result = listOpencodeModels();
     return wsSend(ws, {
@@ -2595,8 +2648,8 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
 
     case '/model': {
       const modelInput = parts[1];
-      if (agent === 'codex' || agent === 'opencode') {
-        const agentLabel = agent === 'codex' ? 'Codex' : 'OpenCode';
+      if (agent === 'codex' || agent === 'kimi' || agent === 'opencode') {
+        const agentLabel = agent === 'codex' ? 'Codex' : agent === 'kimi' ? 'Kimi' : 'OpenCode';
         if (!modelInput) {
           const current = session?.model || '配置默认模型';
           wsSend(ws, { type: 'system_message', message: `当前 ${agentLabel} 模型: ${current}\n用法: /model <模型名>` });
@@ -2631,7 +2684,9 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
     }
 
     case '/cost': {
-      if (isUsageMeteredAgent(agent)) {
+      if (agent === 'kimi') {
+        wsSend(ws, { type: 'system_message', message: 'Kimi 当前未在 cc-web 中提供会话级 token / 费用统计。' });
+      } else if (isUsageMeteredAgent(agent)) {
         const usage = session?.totalUsage || { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
         wsSend(ws, {
           type: 'system_message',
@@ -3086,6 +3141,11 @@ function handleDeleteSession(ws, sessionId) {
         opencodeSessionId: session?.opencodeSessionId || null,
         removed,
       });
+    } else if (sessionAgent === 'kimi') {
+      plog('INFO', 'kimi_session_deleted', {
+        sessionId: sessionId.slice(0, 8),
+        kimiSessionId: session?.kimiSessionId || null,
+      });
     } else {
       deleteClaudeLocalSession(session?.claudeSessionId || null);
     }
@@ -3286,28 +3346,46 @@ function handleMessage(ws, msg, options = {}) {
   const errorPath = path.join(dir, 'error.log');
 
   const stdinMode = spawnSpec.stdinMode || ((isClaudeSession(session) && resolvedAttachments.length > 0) ? 'stream-json' : 'file');
+  const streamJsonFormat = spawnSpec.streamJsonFormat || 'claude-message';
 
   if (stdinMode === 'stream-json') {
     const content = [];
     if (textValue) content.push({ type: 'text', text: textValue });
     for (const attachment of resolvedAttachments) {
       const data = fs.readFileSync(attachment.path).toString('base64');
-      content.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: attachment.mime,
-          data,
-        },
-      });
+      if (streamJsonFormat === 'kimi-message') {
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${attachment.mime};base64,${data}`,
+          },
+        });
+      } else {
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: attachment.mime,
+            data,
+          },
+        });
+      }
     }
-    fs.writeFileSync(inputPath, `${JSON.stringify({
-      type: 'user',
-      message: {
-        role: 'user',
-        content,
-      },
-    })}\n`);
+    const payload = streamJsonFormat === 'kimi-message'
+      ? {
+          role: 'user',
+          content: content.length <= 1 && content[0]?.type === 'text'
+            ? content[0].text
+            : content,
+        }
+      : {
+          type: 'user',
+          message: {
+            role: 'user',
+            content,
+          },
+        };
+    fs.writeFileSync(inputPath, `${JSON.stringify(payload)}\n`);
   } else if (stdinMode === 'file') {
     fs.writeFileSync(inputPath, textValue);
   }
@@ -3485,6 +3563,7 @@ const {
   processEnv: process.env,
   CLAUDE_PATH,
   CODEX_PATH,
+  KIMI_PATH,
   OPENCODE_PATH,
   MODEL_MAP,
   loadModelConfig,
@@ -3772,6 +3851,99 @@ function getOpencodeCliSpec(args = []) {
     };
   }
   return { command: OPENCODE_PATH, args };
+}
+
+function getKimiShareDir() {
+  const explicit = String(process.env.KIMI_SHARE_DIR || '').trim();
+  if (explicit) return explicit;
+  return path.join(getHomeDir(), '.kimi');
+}
+
+function stripTomlStringLiteral(raw) {
+  const value = String(raw || '').trim();
+  const match = value.match(/^["'](.+?)["']$/);
+  return match ? match[1] : value;
+}
+
+function parseKimiTomlModels(rawToml) {
+  const raw = String(rawToml || '');
+  const models = new Set();
+  let defaultModel = '';
+
+  const defaultMatch = raw.match(/^\s*default_model\s*=\s*("[^"]+"|'[^']+'|[^\r\n#]+)/m);
+  if (defaultMatch) defaultModel = stripTomlStringLiteral(defaultMatch[1]);
+
+  const sectionPattern = /^\s*\[models\.(?:"([^"]+)"|'([^']+)'|([^[\]\s#]+))\]\s*$/gm;
+  let match;
+  while ((match = sectionPattern.exec(raw)) !== null) {
+    const model = String(match[1] || match[2] || match[3] || '').trim();
+    if (model) models.add(model);
+  }
+
+  return {
+    models: Array.from(models).sort((a, b) => a.localeCompare(b)),
+    defaultModel,
+    sourceFound: raw.trim().length > 0,
+    sourcePath: '',
+  };
+}
+
+function readKimiModelCatalog() {
+  const shareDir = getKimiShareDir();
+  const tomlPath = path.join(shareDir, 'config.toml');
+  if (fs.existsSync(tomlPath)) {
+    const parsed = parseKimiTomlModels(fs.readFileSync(tomlPath, 'utf8'));
+    parsed.sourcePath = tomlPath;
+    return parsed;
+  }
+
+  const legacyJsonPath = path.join(shareDir, 'config.json');
+  if (fs.existsSync(legacyJsonPath)) {
+    try {
+      const json = JSON.parse(fs.readFileSync(legacyJsonPath, 'utf8'));
+      const models = Object.keys(json?.models || {}).filter(Boolean).sort((a, b) => a.localeCompare(b));
+      return {
+        models,
+        defaultModel: String(json?.default_model || '').trim(),
+        sourceFound: true,
+        sourcePath: legacyJsonPath,
+      };
+    } catch {}
+  }
+
+  return {
+    models: [],
+    defaultModel: '',
+    sourceFound: false,
+    sourcePath: tomlPath,
+  };
+}
+
+function listKimiModels() {
+  try {
+    const catalog = readKimiModelCatalog();
+    if (catalog.models.length > 0) {
+      return { success: true, models: catalog.models, message: '' };
+    }
+    if (catalog.sourceFound) {
+      return {
+        success: false,
+        models: [],
+        message: `已读取 Kimi 配置，但未发现可用模型定义：${catalog.sourcePath}`,
+      };
+    }
+    return {
+      success: false,
+      models: [],
+      message: `未找到 Kimi 配置文件：${catalog.sourcePath}`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      models: [],
+      message: formatRuntimeError('kimi', String(error?.message || error || '无法读取模型列表')),
+    };
+  }
 }
 
 function listOpencodeModels() {

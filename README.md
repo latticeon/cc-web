@@ -1,6 +1,6 @@
 # CC-Web
 
-Claude Code / Codex 轻量级 Web 远程工具 — 在浏览器中与本机 CLI Agent 交互。
+Claude Code / Codex / Kimi 轻量级 Web 远程工具 — 在浏览器中与本机 CLI Agent 交互。
 
 ![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
@@ -34,10 +34,11 @@ https://github.com/ZgDaniel/cc-web 给我装！
 ## 前提条件
 
 - **Node.js** >= 18
-- **Claude Code CLI** 或 **Codex CLI** 已安装并配置
+- **Claude Code CLI**、**Codex CLI** 或 **Kimi CLI** 已安装并配置
   ```bash
   npm install -g @anthropic-ai/claude-code
   npm install -g @openai/codex
+  npm install -g @moonshotai/kimi-code
   ```
 
 ## 快速开始
@@ -76,6 +77,7 @@ copy .env.example .env  & REM 可选
 | `PORT` | 否 | `8002` | 服务监听端口 |
 | `CLAUDE_PATH` | 否 | `claude` | Claude CLI 可执行文件路径 |
 | `CODEX_PATH` | 否 | `codex` | Codex CLI 可执行文件路径 |
+| `KIMI_PATH` | 否 | `kimi` | Kimi CLI 可执行文件路径 |
 | `CC_WEB_CONFIG_DIR` | 否 | `./config` | 配置目录覆写（主要供隔离测试使用） |
 | `CC_WEB_SESSIONS_DIR` | 否 | `./sessions` | 会话目录覆写（主要供隔离测试使用） |
 | `CC_WEB_LOGS_DIR` | 否 | `./logs` | 日志目录覆写（主要供隔离测试使用） |
@@ -111,7 +113,7 @@ copy .env.example .env  & REM 可选
 cc-web/
 ├── server.js              # Node.js 后端（HTTP + WebSocket + 进程管理 + 通知）
 ├── lib/
-│   ├── agent-runtime.js    # Claude / Codex 运行时适配层
+│   ├── agent-runtime.js    # Claude / Codex / Kimi / OpenCode 运行时适配层
 │   └── codex-rollouts.js   # Codex rollout 历史解析
 ├── public/
 │   ├── index.html          # 页面结构
@@ -127,7 +129,8 @@ cc-web/
 ├── scripts/
 │   ├── regression.js       # 隔离式回归脚本
 │   ├── mock-claude.js      # 回归用 mock Claude CLI
-│   └── mock-codex.js       # 回归用 mock Codex CLI
+│   ├── mock-codex.js       # 回归用 mock Codex CLI
+│   └── mock-kimi.js        # 回归用 mock Kimi CLI
 ├── .env.example            # 环境变量模板
 ├── start.bat               # Windows 一键启动脚本
 ├── .gitignore
@@ -140,15 +143,15 @@ cc-web/
 ### 进程模型
 
 ```
-浏览器 ←WebSocket→ Node.js (server.js) ←文件I/O→ Claude / Codex CLI (detached)
+浏览器 ←WebSocket→ Node.js (server.js) ←文件I/O→ Claude / Codex / Kimi CLI (detached)
 ```
 
-- 每条用户消息会根据当前会话 Agent，spawn Claude 或 Codex 子进程
+- 每条用户消息会根据当前会话 Agent，spawn Claude、Codex、Kimi 或 OpenCode 子进程
 - 进程使用 `detached: true` + `proc.unref()`，独立于 Node.js 生命周期
 - stdin/stdout/stderr 通过文件传递（`sessions/{id}-run/`），不使用 pipe
 - PID 持久化到文件，服务重启后自动恢复（`recoverProcesses()`）
 - 使用 `FileTailer` 实时监听输出文件变化，流式推送给前端
-- Claude / Codex 的 spawn spec 与事件解析分别由 `lib/agent-runtime.js` 管理
+- 各 Agent 的 spawn spec 与事件解析由 `lib/agent-runtime.js` 统一管理
 
 ### 后台任务流程
 

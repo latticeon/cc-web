@@ -95,6 +95,22 @@
       },
     },
     {
+      id: 'kimi',
+      label: 'Kimi',
+      avatar: '',
+      default: false,
+      defaults: { initialModel: '' },
+      modelControl: {
+        kind: 'dynamic',
+        title: '选择 Kimi 模型',
+        loadingText: '正在加载 Kimi 模型…',
+        emptyText: '未获取到 Kimi 可用模型',
+        emptyLabel: '选择模型',
+        sourceLabel: 'Kimi 配置',
+      },
+      import: null,
+    },
+    {
       id: 'opencode',
       label: 'OpenCode',
       avatar: '',
@@ -2707,10 +2723,10 @@
     // Default expansion policy:
     // - Always open AskUserQuestion (it is an actionable UI).
     // - For non coding-agent sessions, auto-open in-flight command execution so users can watch output.
-    // - For Codex/OpenCode sessions, keep everything collapsed by default (less noise), including in-flight commands.
+    // - For Codex/Kimi/OpenCode sessions, keep everything collapsed by default (less noise), including in-flight commands.
     const agent = normalizeAgent(currentAgent);
     const kind = toolKind(tool);
-    const keepCollapsed = agent === 'codex' || agent === 'opencode';
+    const keepCollapsed = agent === 'codex' || agent === 'kimi' || agent === 'opencode';
     if (tool.name === 'AskUserQuestion') {
       details.open = true;
     } else if (!keepCollapsed && !done && kind === 'command_execution') {
@@ -2764,6 +2780,9 @@
     const normalized = normalizeAgent(agent);
     if (normalized === 'codex') {
       return '删除本会话将同步删除本地 Codex rollout 历史与线程记录，不可恢复。确认删除？';
+    }
+    if (normalized === 'kimi') {
+      return '删除本会话只会移除 cc-web 中的 Kimi 会话记录，不会清理 ~/.kimi 下的原生会话。确认删除？';
     }
     if (normalized === 'opencode') {
       return '删除本会话将同步删除本地 OpenCode 会话记录，不可恢复。确认删除？';
@@ -4772,6 +4791,7 @@
     if (sourceKinds.includes('cc-web')) parts.push('cc-web 已导入');
     if (sourceKinds.includes('claude-native')) parts.push('Claude 未导入');
     if (sourceKinds.includes('codex-rollout')) parts.push('Codex 未导入');
+    if (sourceKinds.includes('kimi-native')) parts.push('Kimi 未导入');
     if (sourceKinds.includes('opencode-native')) parts.push('OpenCode 未导入');
     if (item.importedCount || item.unimportedCount) {
       const counts = [];

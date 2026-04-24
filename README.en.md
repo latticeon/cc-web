@@ -1,6 +1,6 @@
 # CC-Web
 
-A lightweight browser interface for Claude Code and Codex, designed to keep each agent close to its native CLI workflow while sharing the same web shell.
+A lightweight browser interface for Claude Code, Codex, and Kimi, designed to keep each agent close to its native CLI workflow while sharing the same web shell.
 
 ![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
@@ -32,11 +32,12 @@ A lightweight browser interface for Claude Code and Codex, designed to keep each
 ## Requirements
 
 - **Node.js** >= 18
-- **Claude Code CLI** and/or **Codex CLI** installed and configured
+- **Claude Code CLI**, **Codex CLI**, and/or **Kimi CLI** installed and configured
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 npm install -g @openai/codex
+npm install -g @moonshotai/kimi-code
 ```
 
 ## Quick Start
@@ -74,6 +75,7 @@ After startup, open `http://localhost:8002` and sign in with your password.
 | `PORT` | No | `8002` | Service port |
 | `CLAUDE_PATH` | No | `claude` | Executable path to Claude CLI |
 | `CODEX_PATH` | No | `codex` | Executable path to Codex CLI |
+| `KIMI_PATH` | No | `kimi` | Executable path to Kimi CLI |
 | `PUSHPLUS_TOKEN` | No | - | PushPlus token (migrated into notification config on first start) |
 
 ### Notification Configuration
@@ -106,7 +108,7 @@ Passwords are stored in `config/auth.json` and support generation + UI updates:
 cc-web/
 ├── server.js              # Node.js backend (HTTP + WebSocket + process management + notifications)
 ├── lib/
-│   ├── agent-runtime.js    # Claude / Codex runtime adapter
+│   ├── agent-runtime.js    # Claude / Codex / Kimi / OpenCode runtime adapter
 │   └── codex-rollouts.js   # Codex rollout history parser
 ├── public/
 │   ├── index.html          # UI structure

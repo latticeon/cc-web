@@ -9,8 +9,9 @@ const WebSocket = require('ws');
 
 const REPO_DIR = path.resolve(__dirname, '..');
 const SERVER_PATH = path.join(REPO_DIR, 'server.js');
-const MOCK_CLAUDE = path.join(REPO_DIR, 'scripts', 'mock-claude.js');
-const MOCK_CODEX = path.join(REPO_DIR, 'scripts', 'mock-codex.js');
+const MOCK_CLAUDE = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-claude.cmd' : 'mock-claude.js');
+const MOCK_CODEX = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-codex.cmd' : 'mock-codex.js');
+const MOCK_KIMI = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-kimi.cmd' : 'mock-kimi.js');
 
 function mkdirp(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -47,8 +48,17 @@ function sql(dbPath, statement) {
 async function waitForPort(port, timeoutMs = 10000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const probe = spawnSync('bash', ['-lc', `ss -tln | grep -q ':${port} '`], { encoding: 'utf8' });
-    if (probe.status === 0) return;
+    const ready = await new Promise((resolve) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    if (ready) return;
     await sleep(100);
   }
   throw new Error(`Timed out waiting for port ${port}`);
@@ -64,7 +74,7 @@ async function waitForFile(filePath, timeoutMs = 10000) {
 }
 
 async function withServer(env, fn) {
-  const child = spawn('/usr/bin/node', [SERVER_PATH], {
+  const child = spawn(process.execPath, [SERVER_PATH], {
     cwd: REPO_DIR,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -293,6 +303,21 @@ function createFakeCodexHistory(homeDir) {
   return { threadId, rolloutPath, stateDb, logsDb };
 }
 
+function createFakeKimiConfig(homeDir) {
+  const shareDir = path.join(homeDir, '.kimi');
+  mkdirp(shareDir);
+  fs.writeFileSync(path.join(shareDir, 'config.toml'), [
+    'default_model = "kimi-k2-turbo-preview"',
+    '',
+    '[models.kimi-k2-turbo-preview]',
+    'description = "Regression default model"',
+    '',
+    '[models.kimi-k2-0905-preview]',
+    'description = "Regression preview model"',
+    '',
+  ].join('\n'));
+}
+
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-web-regression-'));
   const configDir = path.join(tempRoot, 'config');
@@ -315,6 +340,7 @@ async function main() {
 
   createFakeClaudeHistory(homeDir);
   const codexFixture = createFakeCodexHistory(homeDir);
+  createFakeKimiConfig(homeDir);
 
   const port = await getFreePort();
   const password = 'Regression!234';
@@ -328,6 +354,7 @@ async function main() {
     HOME: homeDir,
     CLAUDE_PATH: MOCK_CLAUDE,
     CODEX_PATH: MOCK_CODEX,
+    KIMI_PATH: MOCK_KIMI,
   }, async () => {
     const { ws, messages, token } = await connectWs(port, password);
 
@@ -441,6 +468,71 @@ async function main() {
 	    if (autoCompactRetry.type === 'text_delta') {
 	      assert(/trigger codex context limit/.test(autoCompactRetry.text || ''), 'Codex auto /compact should replay the failed prompt after compact');
 	    }
+
+    ws.send(JSON.stringify({ type: 'list_agent_models', agent: 'kimi', requestId: 'kimi-models' }));
+    const kimiModels = await nextMessage(messages, ws, (msg) => msg.type === 'agent_models_result' && msg.agent === 'kimi');
+    assert(kimiModels.success === true, 'Kimi model list should load from ~/.kimi/config.toml');
+    assert(kimiModels.models.includes('kimi-k2-turbo-preview'), 'Kimi model list missing default model');
+    assert(kimiModels.models.includes('kimi-k2-0905-preview'), 'Kimi model list missing extra model');
+
+    const kimiInitCwd = path.join(tempRoot, 'kimi-space');
+    mkdirp(kimiInitCwd);
+    ws.send(JSON.stringify({ type: 'new_session', agent: 'kimi', cwd: kimiInitCwd, mode: 'plan' }));
+    const kimiSession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'kimi' && msg.cwd === kimiInitCwd);
+    assert(kimiSession.mode === 'plan', 'Kimi new_session should follow requested mode');
+    assert(kimiSession.model === 'kimi-k2-turbo-preview', 'Kimi new_session should inject default model from config');
+
+    ws.send(JSON.stringify({ type: 'message', text: '/init', sessionId: kimiSession.sessionId, mode: 'plan', agent: 'kimi' }));
+    const kimiInitStart = await nextMessage(messages, ws, (msg) => msg.type === 'system_message' && /AGENTS\.md/.test(msg.message || '') && /Kimi|分析项目/.test(msg.message || ''));
+    assert(/AGENTS\.md/.test(kimiInitStart.message || ''), 'Kimi /init should announce AGENTS.md generation');
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === kimiSession.sessionId);
+    assert(fs.existsSync(path.join(kimiInitCwd, 'AGENTS.md')), 'Kimi /init should generate AGENTS.md in the workspace');
+
+    const kimiAttachment = await uploadAttachment(port, token, {
+      filename: 'kimi-test.png',
+      mime: 'image/png',
+      data: Buffer.from('kimi-image'),
+    });
+    ws.send(JSON.stringify({ type: 'message', text: 'first kimi prompt', attachments: [kimiAttachment], mode: 'yolo', agent: 'kimi' }));
+    const kimiImageSession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'kimi' && msg.title === 'first kimi prompt');
+    const kimiToolStart = await nextMessage(messages, ws, (msg) => msg.type === 'tool_start' && msg.name === 'shell_command');
+    assert(kimiToolStart.input?.command === 'pwd', 'Kimi tool call should expose parsed tool input');
+    await nextMessage(messages, ws, (msg) => msg.type === 'tool_end' && msg.toolUseId === kimiToolStart.toolUseId);
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === kimiImageSession.sessionId);
+
+    const storedKimiSession = JSON.parse(fs.readFileSync(path.join(sessionsDir, `${kimiImageSession.sessionId}.json`), 'utf8'));
+    assert(Array.isArray(storedKimiSession.messages?.[0]?.attachments) && storedKimiSession.messages[0].attachments.length === 1, 'Kimi message should persist attachment metadata');
+    assert(storedKimiSession.kimiSessionId, 'Kimi session id should be persisted after first run');
+    const kimiSessionIdBeforeMode = storedKimiSession.kimiSessionId;
+
+    const kimiSpawnLine = fs.readFileSync(path.join(logsDir, 'process.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .find((line) => line.includes(`"event":"process_spawn"`) && line.includes(kimiImageSession.sessionId.slice(0, 8)));
+    assert(kimiSpawnLine && kimiSpawnLine.includes('--input-format stream-json') && kimiSpawnLine.includes('--output-format stream-json'), 'Kimi message should use stream-json print mode');
+    assert(kimiSpawnLine.includes('--yolo'), 'Kimi yolo mode should pass --yolo');
+    assert(kimiSpawnLine.includes(`--session ${kimiSessionIdBeforeMode}`), 'Kimi first run should bind to a named session');
+
+    ws.send(JSON.stringify({ type: 'set_mode', sessionId: kimiImageSession.sessionId, mode: 'plan' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'mode_changed' && msg.mode === 'plan');
+    const storedKimiAfterMode = JSON.parse(fs.readFileSync(path.join(sessionsDir, `${kimiImageSession.sessionId}.json`), 'utf8'));
+    assert(storedKimiAfterMode.kimiSessionId === kimiSessionIdBeforeMode, 'Kimi session id should survive mode switch');
+
+    ws.send(JSON.stringify({ type: 'message', text: 'second kimi prompt', sessionId: kimiImageSession.sessionId, mode: 'plan', agent: 'kimi' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === kimiImageSession.sessionId);
+    const kimiSpawns = fs.readFileSync(path.join(logsDir, 'process.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes(`"event":"process_spawn"`) && line.includes(kimiImageSession.sessionId.slice(0, 8)));
+    const lastKimiSpawn = kimiSpawns[kimiSpawns.length - 1] || '';
+    assert(lastKimiSpawn.includes(`--session ${kimiSessionIdBeforeMode}`), 'Kimi mode switch should keep named session id');
+    assert(lastKimiSpawn.includes('--plan'), 'Kimi plan mode should pass --plan');
+
+    ws.send(JSON.stringify({ type: 'message', text: '/compact', sessionId: kimiImageSession.sessionId, mode: 'yolo', agent: 'kimi' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'system_message' && /正在执行 Kimi \/compact/.test(msg.message || ''));
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === kimiImageSession.sessionId);
+    const kimiCompactDone = await nextMessage(messages, ws, (msg) => msg.type === 'system_message' && /已执行 Kimi \/compact/.test(msg.message || ''));
+    assert(/已执行 Kimi \/compact/.test(kimiCompactDone.message || ''), 'Kimi /compact should complete with Kimi-specific status message');
 
     const claudeAttachment = await uploadAttachment(port, token, {
       filename: 'claude-test.png',

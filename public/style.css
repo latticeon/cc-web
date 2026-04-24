@@ -691,6 +691,9 @@ body.session-loading-active {
 .session-agent-badge.agent-codex {
   background: #10a37f;
 }
+.session-agent-badge.agent-kimi {
+  background: #f59e0b;
+}
 .session-agent-badge.agent-opencode {
   background: #2563eb;
 }
