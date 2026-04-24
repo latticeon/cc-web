@@ -578,6 +578,9 @@ function usesAgentsMarkdown(agent) {
 
 function resolveAgentDefaultSessionModel(agent) {
   const spec = getAgentConfig(agent).defaults?.defaultSessionModel || null;
+  if (normalizeAgent(agent) === 'opencode') {
+    return resolveOpencodeDefaultModel();
+  }
   if (!spec) return null;
   if (spec.source === 'model-map') {
     return MODEL_MAP[spec.key] || null;
@@ -595,6 +598,50 @@ function resolveAgentDefaultCwd(agent) {
   const spec = getAgentConfig(agent).defaults?.localTaskCwd || null;
   if (spec?.source === 'home') return getHomeDir();
   return null;
+}
+
+function resolveOpencodeConfigPath() {
+  return path.join(process.env.HOME || process.env.USERPROFILE || '', '.config', 'opencode', 'opencode.json');
+}
+
+function loadOpencodeConfigFile() {
+  try {
+    const filePath = resolveOpencodeConfigPath();
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function resolveOpencodeConfiguredModel(config) {
+  const cfg = config || loadOpencodeConfigFile();
+  if (!cfg || typeof cfg !== 'object') return null;
+
+  const direct = String(cfg.model || '').trim();
+  if (direct) return direct;
+
+  const buildAgent = String(cfg.agent?.build?.model || '').trim();
+  if (buildAgent) return buildAgent;
+
+  const legacyBuild = String(cfg.mode?.build?.model || '').trim();
+  if (legacyBuild) return legacyBuild;
+
+  return null;
+}
+
+function resolveOpencodeDefaultModel() {
+  const configured = resolveOpencodeConfiguredModel();
+  if (configured) return configured;
+
+  try {
+    const latestSession = getOpencodeSessionList()[0] || null;
+    if (!latestSession?.sessionId) return null;
+    const parsed = parseOpencodeExport(loadOpencodeExport(latestSession.sessionId));
+    return String(parsed?.model || '').trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 // === Model Config ===
@@ -1687,6 +1734,7 @@ function handleProcessComplete(sessionId, exitCode, signal) {
 
   // Save result to session
   const session = loadSession(sessionId);
+  let hydratedModelChanged = false;
   if (session && getSessionAgent(session) === 'opencode' && session.opencodeSessionId) {
     const latestTurn = getLatestOpencodeAssistantTurn(session.opencodeSessionId);
     if (latestTurn) {
@@ -1704,6 +1752,11 @@ function handleProcessComplete(sessionId, exitCode, signal) {
       }
       if (typeof latestTurn.totalCost === 'number' && Number.isFinite(latestTurn.totalCost)) {
         session.totalCost = latestTurn.totalCost;
+      }
+      const nextModel = String(latestTurn.model || '').trim();
+      if (nextModel && session.model !== nextModel) {
+        session.model = nextModel;
+        hydratedModelChanged = true;
       }
     }
   }
@@ -1768,6 +1821,9 @@ function handleProcessComplete(sessionId, exitCode, signal) {
       wsSend(entry.ws, { type: 'error', message: completionError });
     }
 
+    if (hydratedModelChanged && session?.model) {
+      wsSend(entry.ws, { type: 'model_changed', model: sessionModelLabel(session) });
+    }
     wsSend(entry.ws, { type: 'done', sessionId, costUsd: entry.lastCost || null });
     sendSessionList(entry.ws);
     // Push notification when trigger='always' (user online but still wants notification)
@@ -4188,6 +4244,7 @@ function getLatestOpencodeAssistantTurn(opencodeSessionId) {
         content: message.content || '',
         toolCalls: message.toolCalls || [],
         steps: message.steps || [],
+        model: parsed.model || null,
         totalUsage: parsed.totalUsage,
         totalCost: parsed.totalCost,
       };
