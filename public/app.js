@@ -2046,12 +2046,20 @@
         if (typeof _onCodexConfig === 'function') _onCodexConfig(msg.config);
         break;
 
+      case 'kimi_config':
+        if (typeof _onKimiConfig === 'function') _onKimiConfig(msg.config);
+        break;
+
       case 'claude_local_config':
         if (typeof _onClaudeLocalConfig === 'function') _onClaudeLocalConfig(msg);
         break;
 
       case 'codex_local_config':
         if (typeof _onCodexLocalConfig === 'function') _onCodexLocalConfig(msg);
+        break;
+
+      case 'kimi_local_config':
+        if (typeof _onKimiLocalConfig === 'function') _onKimiLocalConfig(msg);
         break;
 
       case 'dev_config':
@@ -3836,10 +3844,12 @@
   let _onNotifyTestResult = null;
   let _onModelConfig = null;
   let _onCodexConfig = null;
+  let _onKimiConfig = null;
   let _onFetchModelsResult = null;
   let _onAgentImportSessions = null;
   let _onClaudeLocalConfig = null;
   let _onCodexLocalConfig = null;
+  let _onKimiLocalConfig = null;
   let _onDevConfig = null;
 
   const settingsBtn = $('#settings-btn');
@@ -3851,6 +3861,22 @@
     { value: 'serverchan', label: 'Server酱' },
     { value: 'feishu', label: '飞书机器人' },
     { value: 'qqbot', label: 'QQ（Qmsg）' },
+  ];
+
+  const KIMI_PROVIDER_OPTIONS = [
+    { value: 'kimi', label: 'kimi' },
+    { value: 'openai_responses', label: 'openai_responses' },
+    { value: 'openai_legacy', label: 'openai_legacy' },
+    { value: 'anthropic', label: 'anthropic' },
+    { value: 'gemini', label: 'gemini' },
+    { value: 'vertexai', label: 'vertexai' },
+  ];
+
+  const KIMI_CAPABILITY_OPTIONS = [
+    { value: 'thinking', label: 'thinking' },
+    { value: 'always_thinking', label: 'always_thinking' },
+    { value: 'image_in', label: 'image_in' },
+    { value: 'video_in', label: 'video_in' },
   ];
 
   function buildNotifyFieldsHtml(config, provider) {
@@ -4115,6 +4141,7 @@
   function showSettingsPanel() {
     send({ type: 'get_model_config' });
     send({ type: 'get_codex_config' });
+    send({ type: 'get_kimi_config' });
     send({ type: 'get_notify_config' });
 
     const overlay = document.createElement('div');
@@ -4145,6 +4172,15 @@
         <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
       </div>
       <div class="settings-status" id="codex-status"></div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-section-title">Kimi CLI 配置</div>
+      <div id="kimi-config-area"></div>
+      <div class="settings-actions">
+        <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
+      </div>
+      <div class="settings-status" id="kimi-status"></div>
 
       <div class="settings-divider"></div>
 
@@ -4481,6 +4517,37 @@
       modal.querySelector('#codex-info-ok').addEventListener('click', closeModal);
     }
 
+    function showKimiLocalInfoModal() {
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '460px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>Kimi 本地配置说明</h3>
+          <button class="settings-close" id="kimi-info-close">&times;</button>
+        </div>
+        <div class="settings-inline-note">
+          选中"本地配置"时，CC-Web 会直接复用本机 <code>~/.kimi/config.toml</code>（或旧版 <code>config.json</code>）中的 Kimi CLI 配置，不会覆盖或修改本机文件。
+          <br><br>
+          切换到自定义 Profile 后，CC-Web 会为当前运行生成独立的 Kimi JSON 配置，并通过 <code>kimi --config-file ...</code> 启动，不会改写你的本地 <code>~/.kimi</code>。
+          <br><br>
+          模型切换只会使用当前激活 Profile 中定义的模型别名；如果需要在 Web 里切模型，请先把对应模型加入该 Profile。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="kimi-info-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#kimi-info-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#kimi-info-ok').addEventListener('click', closeModal);
+    }
+
     modelSaveBtn.addEventListener('click', () => {
       const isLocal = modelActiveTemplate === '';
       const config = {
@@ -4775,6 +4842,496 @@
       modal.querySelector('#read-codex-local-ok').addEventListener('click', closeModal);
     };
 
+    // === Kimi Config UI ===
+    const kimiConfigArea = panel.querySelector('#kimi-config-area');
+    const kimiStatus = panel.querySelector('#kimi-status');
+    const kimiSaveBtn = panel.querySelector('#kimi-save-btn');
+
+    let currentKimiConfig = null;
+    let kimiEditingProfiles = [];
+    let kimiActiveProfile = '';
+
+    function cloneKimiProfile(profile = {}) {
+      return {
+        _originalName: profile._originalName || profile.name || '',
+        name: profile.name || '',
+        providerType: profile.providerType || 'kimi',
+        apiKey: profile.apiKey || '',
+        apiBase: profile.apiBase || '',
+        defaultModel: profile.defaultModel || '',
+        models: Array.isArray(profile.models) ? profile.models.map((model) => ({
+          name: model?.name || '',
+          model: model?.model || '',
+          maxContextSize: model?.maxContextSize || 262144,
+          capabilities: Array.isArray(model?.capabilities) ? [...model.capabilities] : [],
+        })) : [],
+        services: {
+          searchBase: profile.services?.searchBase || '',
+          searchApiKey: profile.services?.searchApiKey || '',
+          fetchBase: profile.services?.fetchBase || '',
+          fetchApiKey: profile.services?.fetchApiKey || '',
+        },
+      };
+    }
+
+    function normalizeKimiCapabilities(list) {
+      const allowed = new Set(KIMI_CAPABILITY_OPTIONS.map((item) => item.value));
+      const seen = new Set();
+      const result = [];
+      (Array.isArray(list) ? list : []).forEach((item) => {
+        const value = String(item || '').trim();
+        if (!value || !allowed.has(value) || seen.has(value)) return;
+        seen.add(value);
+        result.push(value);
+      });
+      return result;
+    }
+
+    function ensureKimiDefaultModel(profile) {
+      const names = (Array.isArray(profile.models) ? profile.models : [])
+        .map((model) => String(model?.name || '').trim())
+        .filter(Boolean);
+      if (!names.length) {
+        profile.defaultModel = '';
+        return;
+      }
+      if (!names.includes(profile.defaultModel)) {
+        profile.defaultModel = names[0];
+      }
+    }
+
+    function normalizeKimiProfile(profile = {}) {
+      const next = cloneKimiProfile(profile);
+      next.models = next.models.filter((model) => model.name && model.model);
+      next.models.forEach((model) => {
+        const parsed = parseInt(model.maxContextSize, 10);
+        model.maxContextSize = Number.isFinite(parsed) && parsed > 0 ? parsed : 262144;
+        model.capabilities = normalizeKimiCapabilities(model.capabilities);
+      });
+      ensureKimiDefaultModel(next);
+      return next;
+    }
+
+    function showKimiStatus(msg, type) {
+      kimiStatus.textContent = msg;
+      kimiStatus.className = 'settings-status ' + (type || '');
+    }
+
+    function renderKimiConfigArea() {
+      const isLocal = kimiActiveProfile === '';
+      const profileOptions = kimiEditingProfiles.map((profile) =>
+        `<option value="${escapeHtml(profile.name)}" ${profile.name === kimiActiveProfile ? 'selected' : ''}>${escapeHtml(profile.name)}</option>`
+      ).join('');
+
+      if (isLocal) {
+        kimiConfigArea.innerHTML = `
+          <div class="settings-field">
+            <label>激活 Profile</label>
+            <div style="display:flex;gap:6px;align-items:center">
+              <select class="settings-select" id="kimi-profile-select" style="flex:1">
+                <option value="__local__" selected>本地配置</option>
+                ${profileOptions}
+                <option value="__new__">+ 新建 Profile</option>
+              </select>
+              <button class="btn-test" id="kimi-info-btn" style="padding:4px 10px">说明</button>
+              <button class="btn-test" id="kimi-read-local-btn" style="padding:4px 10px">读取当前配置</button>
+            </div>
+          </div>
+          <div class="settings-inline-note">
+            直接复用本机 <code>~/.kimi/config.toml</code>（或旧版 <code>config.json</code>）中的 Kimi CLI 配置。
+          </div>
+        `;
+        panel.querySelector('#kimi-profile-select').addEventListener('change', (e) => {
+          if (e.target.value === '__new__') {
+            openKimiProfileModal();
+          } else if (e.target.value === '__local__') {
+            kimiActiveProfile = '';
+            renderKimiConfigArea();
+          } else {
+            kimiActiveProfile = e.target.value;
+            renderKimiConfigArea();
+          }
+        });
+        panel.querySelector('#kimi-info-btn').addEventListener('click', showKimiLocalInfoModal);
+        panel.querySelector('#kimi-read-local-btn').addEventListener('click', () => send({ type: 'read_kimi_local_config' }));
+        return;
+      }
+
+      const currentProfile = kimiEditingProfiles.find((profile) => profile.name === kimiActiveProfile);
+      const summaryProvider = currentProfile?.providerType || 'kimi';
+      const summaryModel = currentProfile?.defaultModel || '未设置';
+      const summaryCount = Array.isArray(currentProfile?.models) ? currentProfile.models.length : 0;
+
+      kimiConfigArea.innerHTML = `
+        <div class="settings-field">
+          <label>激活 Profile</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select class="settings-select" id="kimi-profile-select" style="flex:1">
+              <option value="__local__">本地配置</option>
+              ${profileOptions}
+              <option value="__new__">+ 新建 Profile</option>
+            </select>
+            <button class="btn-test" id="kimi-profile-edit" style="padding:4px 10px">编辑</button>
+            <button class="btn-test" id="kimi-profile-del" title="删除" style="padding:4px 8px">删除</button>
+          </div>
+        </div>
+        <div class="settings-inline-note">
+          当前 Profile：<strong>${escapeHtml(currentProfile?.name || '未选择')}</strong> · Provider：<code>${escapeHtml(summaryProvider)}</code> · 默认模型：<code>${escapeHtml(summaryModel)}</code> · 模型数：<code>${summaryCount}</code>
+        </div>
+      `;
+
+      panel.querySelector('#kimi-profile-select').addEventListener('change', (e) => {
+        if (e.target.value === '__new__') {
+          openKimiProfileModal();
+        } else if (e.target.value === '__local__') {
+          kimiActiveProfile = '';
+          renderKimiConfigArea();
+        } else {
+          kimiActiveProfile = e.target.value;
+          renderKimiConfigArea();
+        }
+      });
+      panel.querySelector('#kimi-profile-edit').addEventListener('click', () => openKimiProfileModal(kimiActiveProfile));
+      panel.querySelector('#kimi-profile-del').addEventListener('click', () => {
+        if (!kimiActiveProfile) return;
+        if (!confirm(`确认删除 Kimi Profile「${kimiActiveProfile}」?`)) return;
+        kimiEditingProfiles = kimiEditingProfiles.filter((profile) => profile.name !== kimiActiveProfile);
+        kimiActiveProfile = kimiEditingProfiles[0]?.name || '';
+        renderKimiConfigArea();
+      });
+    }
+
+    function openKimiModelModal(targetProfile, modelIndex = -1, rerender = () => {}) {
+      const currentModel = modelIndex >= 0 ? targetProfile.models[modelIndex] : null;
+      const draftModel = currentModel
+        ? { ...currentModel, capabilities: Array.isArray(currentModel.capabilities) ? [...currentModel.capabilities] : [] }
+        : { name: '', model: '', maxContextSize: 262144, capabilities: [] };
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10002';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '460px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>${currentModel ? `编辑模型: ${escapeHtml(currentModel.name)}` : '添加模型'}</h3>
+          <button class="settings-close" id="kimi-model-close">&times;</button>
+        </div>
+        <div class="settings-field">
+          <label>模型别名</label>
+          <input type="text" id="kimi-model-name" placeholder="例如 kimi-for-coding" value="${escapeHtml(draftModel.name || '')}">
+        </div>
+        <div class="settings-field">
+          <label>API 模型 ID</label>
+          <input type="text" id="kimi-model-id" placeholder="例如 kimi-k2-thinking-turbo" value="${escapeHtml(draftModel.model || '')}">
+        </div>
+        <div class="settings-field">
+          <label>最大上下文长度</label>
+          <input type="number" id="kimi-model-context" min="1" step="1" value="${escapeHtml(String(draftModel.maxContextSize || 262144))}">
+        </div>
+        <div class="settings-field">
+          <label>能力</label>
+          <div style="display:flex;flex-wrap:wrap;gap:10px">
+            ${KIMI_CAPABILITY_OPTIONS.map((item) => `
+              <label style="font-size:0.88em;display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" data-kimi-cap="${escapeHtml(item.value)}" ${draftModel.capabilities.includes(item.value) ? 'checked' : ''} style="width:auto;margin:0">
+                <span>${escapeHtml(item.label)}</span>
+              </label>
+            `).join('')}
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="kimi-model-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#kimi-model-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#kimi-model-ok').addEventListener('click', () => {
+        const name = modal.querySelector('#kimi-model-name').value.trim();
+        const model = modal.querySelector('#kimi-model-id').value.trim();
+        const parsedContext = parseInt(modal.querySelector('#kimi-model-context').value, 10);
+        const maxContextSize = Number.isFinite(parsedContext) && parsedContext > 0 ? parsedContext : 0;
+        const capabilities = normalizeKimiCapabilities(Array.from(modal.querySelectorAll('[data-kimi-cap]'))
+          .filter((input) => input.checked)
+          .map((input) => input.getAttribute('data-kimi-cap')));
+        if (!name) { alert('请填写模型别名'); return; }
+        if (!model) { alert('请填写 API 模型 ID'); return; }
+        if (!maxContextSize) { alert('请填写有效的最大上下文长度'); return; }
+        const existing = targetProfile.models.find((item, index) => item.name === name && index !== modelIndex);
+        if (existing) { alert('模型别名已存在'); return; }
+        const previousName = currentModel?.name || '';
+        const nextModel = { name, model, maxContextSize, capabilities };
+        if (modelIndex >= 0) {
+          targetProfile.models[modelIndex] = nextModel;
+        } else {
+          targetProfile.models.push(nextModel);
+        }
+        if (!targetProfile.defaultModel || targetProfile.defaultModel === previousName) {
+          targetProfile.defaultModel = name;
+        }
+        ensureKimiDefaultModel(targetProfile);
+        closeModal();
+        rerender();
+      });
+    }
+
+    function openKimiProfileModal(profileName = '') {
+      const current = profileName
+        ? kimiEditingProfiles.find((profile) => profile.name === profileName)
+        : null;
+      const draft = normalizeKimiProfile(current || {
+        name: '',
+        providerType: 'kimi',
+        apiKey: '',
+        apiBase: '',
+        defaultModel: '',
+        models: [],
+        services: { searchBase: '', searchApiKey: '', fetchBase: '', fetchApiKey: '' },
+      });
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '560px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>${current ? `编辑 Kimi Profile: ${escapeHtml(current.name)}` : '新建 Kimi Profile'}</h3>
+          <button class="settings-close" id="kimi-profile-modal-close">&times;</button>
+        </div>
+        <div class="settings-field">
+          <label>Profile 名称</label>
+          <input type="text" id="kimi-profile-name" placeholder="例如 Moonshot Work" value="${escapeHtml(draft.name || '')}">
+        </div>
+        <div class="settings-field">
+          <label>Provider 类型</label>
+          <select class="settings-select" id="kimi-profile-provider">
+            ${KIMI_PROVIDER_OPTIONS.map((item) => `<option value="${escapeHtml(item.value)}" ${draft.providerType === item.value ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="settings-field">
+          <label>API Key</label>
+          <input type="text" id="kimi-profile-apikey" placeholder="sk-..." value="${escapeHtml(draft.apiKey || '')}">
+        </div>
+        <div class="settings-field">
+          <label>API Base URL</label>
+          <input type="text" id="kimi-profile-apibase" placeholder="https://api.kimi.com/coding/v1" value="${escapeHtml(draft.apiBase || '')}">
+        </div>
+        <div class="settings-field">
+          <label>默认模型</label>
+          <select class="settings-select" id="kimi-profile-default-model"></select>
+        </div>
+        <div class="settings-field">
+          <label>模型定义</label>
+          <div id="kimi-model-list"></div>
+          <div class="settings-actions" style="margin-top:10px">
+            <button class="btn-test" id="kimi-model-add" style="padding:4px 12px">添加模型</button>
+          </div>
+        </div>
+        <div class="settings-divider" style="margin:12px 0"></div>
+        <div class="settings-field">
+          <label>Search 服务 Base URL（可选）</label>
+          <input type="text" id="kimi-search-base" placeholder="https://api.kimi.com/coding/v1/search" value="${escapeHtml(draft.services.searchBase || '')}">
+        </div>
+        <div class="settings-field">
+          <label>Search 服务 API Key（可选）</label>
+          <input type="text" id="kimi-search-apikey" placeholder="sk-..." value="${escapeHtml(draft.services.searchApiKey || '')}">
+        </div>
+        <div class="settings-field">
+          <label>Fetch 服务 Base URL（可选）</label>
+          <input type="text" id="kimi-fetch-base" placeholder="https://api.kimi.com/coding/v1/fetch" value="${escapeHtml(draft.services.fetchBase || '')}">
+        </div>
+        <div class="settings-field">
+          <label>Fetch 服务 API Key（可选）</label>
+          <input type="text" id="kimi-fetch-apikey" placeholder="sk-..." value="${escapeHtml(draft.services.fetchApiKey || '')}">
+        </div>
+        <div class="settings-inline-note">
+          Kimi 会读取 Profile 里定义的模型别名。会话内的模型切换只会在这些别名之间生效；搜索和抓取服务不填则按 Kimi CLI 默认行为处理。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="kimi-profile-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+
+      const defaultModelSelect = modal.querySelector('#kimi-profile-default-model');
+      const modelList = modal.querySelector('#kimi-model-list');
+
+      function renderDraftModels() {
+        ensureKimiDefaultModel(draft);
+        const options = draft.models.map((model) =>
+          `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`
+        ).join('');
+        defaultModelSelect.innerHTML = options || '<option value="">请先添加模型</option>';
+        defaultModelSelect.value = draft.defaultModel || '';
+        modelList.innerHTML = draft.models.length ? draft.models.map((model, index) => `
+          <div class="settings-inline-note" style="margin-top:${index === 0 ? '0' : '8px'}">
+            <strong>${escapeHtml(model.name)}</strong> → <code>${escapeHtml(model.model)}</code> · ${escapeHtml(String(model.maxContextSize))} tokens · ${escapeHtml(model.capabilities.join(', ') || '无额外能力')}
+            <span style="float:right;display:flex;gap:6px">
+              <button class="btn-test" type="button" data-kimi-model-edit="${index}" style="padding:2px 10px">编辑</button>
+              <button class="btn-test" type="button" data-kimi-model-del="${index}" style="padding:2px 10px">删除</button>
+            </span>
+          </div>
+        `).join('') : '<div class="settings-inline-note">还没有配置模型，请至少添加一个模型。</div>';
+        modelList.querySelectorAll('[data-kimi-model-edit]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            openKimiModelModal(draft, parseInt(btn.getAttribute('data-kimi-model-edit'), 10), renderDraftModels);
+          });
+        });
+        modelList.querySelectorAll('[data-kimi-model-del]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const index = parseInt(btn.getAttribute('data-kimi-model-del'), 10);
+            const removed = draft.models[index];
+            if (!removed) return;
+            draft.models.splice(index, 1);
+            if (draft.defaultModel === removed.name) {
+              draft.defaultModel = draft.models[0]?.name || '';
+            }
+            renderDraftModels();
+          });
+        });
+      }
+
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#kimi-profile-modal-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#kimi-model-add').addEventListener('click', () => openKimiModelModal(draft, -1, renderDraftModels));
+      renderDraftModels();
+
+      modal.querySelector('#kimi-profile-ok').addEventListener('click', () => {
+        const name = modal.querySelector('#kimi-profile-name').value.trim();
+        const providerType = modal.querySelector('#kimi-profile-provider').value;
+        const apiKey = modal.querySelector('#kimi-profile-apikey').value.trim();
+        const apiBase = modal.querySelector('#kimi-profile-apibase').value.trim();
+        const defaultModel = defaultModelSelect.value.trim();
+        const searchBase = modal.querySelector('#kimi-search-base').value.trim();
+        const searchApiKey = modal.querySelector('#kimi-search-apikey').value.trim();
+        const fetchBase = modal.querySelector('#kimi-fetch-base').value.trim();
+        const fetchApiKey = modal.querySelector('#kimi-fetch-apikey').value.trim();
+        if (!name) { alert('请填写 Profile 名称'); return; }
+        if (!apiKey) { alert('请填写 API Key'); return; }
+        if (!apiBase) { alert('请填写 API Base URL'); return; }
+        if (draft.models.length === 0) { alert('请至少添加一个模型'); return; }
+        if (!defaultModel) { alert('请选择默认模型'); return; }
+        if ((searchBase && !searchApiKey) || (!searchBase && searchApiKey)) {
+          alert('搜索服务需要同时填写 Base URL 和 API Key');
+          return;
+        }
+        if ((fetchBase && !fetchApiKey) || (!fetchBase && fetchApiKey)) {
+          alert('抓取服务需要同时填写 Base URL 和 API Key');
+          return;
+        }
+        const existing = kimiEditingProfiles.find((profile) => profile.name === name);
+        if (existing && existing !== current) { alert('Profile 名称已存在'); return; }
+
+        const nextProfile = normalizeKimiProfile({
+          _originalName: current?._originalName || current?.name || '',
+          name,
+          providerType,
+          apiKey,
+          apiBase,
+          defaultModel,
+          models: draft.models,
+          services: {
+            searchBase,
+            searchApiKey,
+            fetchBase,
+            fetchApiKey,
+          },
+        });
+
+        if (current) {
+          Object.assign(current, nextProfile);
+        } else {
+          kimiEditingProfiles.push(nextProfile);
+        }
+        kimiActiveProfile = name;
+        closeModal();
+        renderKimiConfigArea();
+      });
+    }
+
+    _onKimiConfig = (config) => {
+      currentKimiConfig = config || {};
+      kimiEditingProfiles = (currentKimiConfig.profiles || []).map((profile) =>
+        normalizeKimiProfile({ ...profile, _originalName: profile.name })
+      );
+      if (currentKimiConfig.mode === 'local') {
+        kimiActiveProfile = '';
+      } else {
+        kimiActiveProfile = currentKimiConfig.activeProfile || (kimiEditingProfiles[0]?.name || '');
+      }
+      renderKimiConfigArea();
+    };
+
+    kimiSaveBtn.addEventListener('click', () => {
+      const isLocal = kimiActiveProfile === '';
+      if (!isLocal && kimiEditingProfiles.length === 0) {
+        showKimiStatus('自定义模式至少需要一个 Kimi Profile', 'error');
+        return;
+      }
+      const profiles = kimiEditingProfiles.map((profile) => normalizeKimiProfile(profile));
+      send({
+        type: 'save_kimi_config',
+        config: {
+          mode: isLocal ? 'local' : 'custom',
+          activeProfile: isLocal ? '' : kimiActiveProfile,
+          profiles,
+        },
+      });
+      showKimiStatus('已保存', 'success');
+    });
+
+    _onKimiLocalConfig = (msg) => {
+      const config = msg.config || {};
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '500px';
+      const fields = [
+        ['配置文件', config.sourcePath || '(空)'],
+        ['默认模型', config.defaultModel || '(空)'],
+        ['可用模型', Array.isArray(config.models) && config.models.length ? config.models.join(', ') : '(空)'],
+        ['Provider 名称', config.providerName || '(空)'],
+        ['Provider 类型', config.providerType || '(空)'],
+        ['API Base URL', config.apiBase || '(空)'],
+        ['API Key', config.apiKey || '(空)'],
+        ['当前默认模型 ID', config.modelName || '(空)'],
+        ['最大上下文长度', config.maxContextSize ? String(config.maxContextSize) : '(空)'],
+        ['模型能力', Array.isArray(config.capabilities) && config.capabilities.length ? config.capabilities.join(', ') : '(空)'],
+        ['Search 服务', config.searchBase || '(空)'],
+        ['Search API Key', config.searchApiKey || '(空)'],
+        ['Fetch 服务', config.fetchBase || '(空)'],
+        ['Fetch API Key', config.fetchApiKey || '(空)'],
+      ];
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>当前 Kimi 本地配置</h3>
+          <button class="settings-close" id="read-kimi-local-close">&times;</button>
+        </div>
+        ${!msg.sourceFound ? '<div class="settings-inline-note" style="color:var(--text-warning, #e8a838)">未找到 ~/.kimi/config.toml 或 config.json。</div>' : ''}
+        ${fields.map(([label, val]) => `
+          <div class="settings-field">
+            <label>${label}</label>
+            <div style="font-size:0.9em;word-break:break-all;color:var(--text-secondary)">${escapeHtml(val)}</div>
+          </div>
+        `).join('')}
+        <div class="settings-actions"><button class="btn-save" id="read-kimi-local-ok">关闭</button></div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#read-kimi-local-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#read-kimi-local-ok').addEventListener('click', closeModal);
+    };
+
     // === System UI ===
     const closeBtn = panel.querySelector('.settings-close');
     const pwOpenModalBtn = panel.querySelector('#pw-open-modal-btn');
@@ -4823,9 +5380,11 @@
     _onNotifyTestResult = null;
     _onModelConfig = null;
     _onCodexConfig = null;
+    _onKimiConfig = null;
     _onFetchModelsResult = null;
     _onClaudeLocalConfig = null;
     _onCodexLocalConfig = null;
+    _onKimiLocalConfig = null;
     _onDevConfig = null;
     window._ccOnUpdateInfo = null;
     document.removeEventListener('keydown', _settingsEscape);

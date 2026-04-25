@@ -25,6 +25,19 @@ if not exist node_modules (
     npm install
 )
 
+set "PORT_PID="
+for /f %%P in ('powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue ^| Select-Object -First 1 -ExpandProperty OwningProcess; if ($c) { Write-Output $c }"') do (
+    set "PORT_PID=%%P"
+)
+
+if defined PORT_PID (
+    echo [ERROR] Port %PORT% is already in use by PID %PORT_PID%.
+    echo Another CC-Web instance or another service may already be running.
+    echo Close the existing process, or change PORT in .env, then try again.
+    pause
+    exit /b 1
+)
+
 echo Access URLs:
 echo   Local: http://127.0.0.1:%PORT%
 if /i "%HOST%"=="0.0.0.0" (

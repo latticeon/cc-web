@@ -94,6 +94,7 @@ const NOTIFY_CONFIG_PATH = path.join(CONFIG_DIR, 'notify.json');
 const AUTH_CONFIG_PATH = path.join(CONFIG_DIR, 'auth.json');
 const MODEL_CONFIG_PATH = path.join(CONFIG_DIR, 'model.json');
 const CODEX_CONFIG_PATH = path.join(CONFIG_DIR, 'codex.json');
+const KIMI_CONFIG_PATH = path.join(CONFIG_DIR, 'kimi.json');
 const BANNED_IPS_PATH = path.join(CONFIG_DIR, 'banned_ips.json');
 
 fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -677,7 +678,7 @@ function resolveAgentDefaultSessionModel(agent) {
     return MODEL_MAP[spec.key] || null;
   }
   if (spec.source === 'kimi-config-default') {
-    return readKimiModelCatalog().defaultModel || getLatestKnownSessionModel('kimi') || null;
+    return getKimiEffectiveModelCatalog().defaultModel || getLatestKnownSessionModel('kimi') || null;
   }
   if (spec.source === 'literal') {
     return spec.value || null;
@@ -781,6 +782,84 @@ const DEFAULT_CODEX_CONFIG = {
   localSnapshot: {},  // saved snapshot of local ~/.codex config (archive-only, no restore)
 };
 
+const KIMI_PROVIDER_TYPES = new Set([
+  'kimi',
+  'openai_legacy',
+  'openai_responses',
+  'anthropic',
+  'gemini',
+  'vertexai',
+]);
+
+const KIMI_CAPABILITY_TYPES = new Set([
+  'thinking',
+  'always_thinking',
+  'image_in',
+  'video_in',
+]);
+
+const DEFAULT_KIMI_CONFIG = {
+  mode: 'local',
+  activeProfile: '',
+  profiles: [],
+};
+
+function normalizeKimiCapabilityList(rawList) {
+  if (!Array.isArray(rawList)) return [];
+  const result = [];
+  const seen = new Set();
+  for (const item of rawList) {
+    const value = String(item || '').trim();
+    if (!value || !KIMI_CAPABILITY_TYPES.has(value) || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function sanitizeKimiModelEntry(rawModel) {
+  const name = String(rawModel?.name || '').trim();
+  const model = String(rawModel?.model || '').trim();
+  const parsedContext = parseInt(rawModel?.maxContextSize, 10);
+  return {
+    name,
+    model,
+    maxContextSize: Number.isFinite(parsedContext) && parsedContext > 0 ? parsedContext : 262144,
+    capabilities: normalizeKimiCapabilityList(rawModel?.capabilities),
+  };
+}
+
+function sanitizeKimiProfile(rawProfile) {
+  const providerTypeRaw = String(rawProfile?.providerType || '').trim();
+  const providerType = KIMI_PROVIDER_TYPES.has(providerTypeRaw) ? providerTypeRaw : 'kimi';
+  const models = [];
+  const seenNames = new Set();
+  for (const item of Array.isArray(rawProfile?.models) ? rawProfile.models : []) {
+    const model = sanitizeKimiModelEntry(item);
+    if (!model.name || !model.model || seenNames.has(model.name)) continue;
+    seenNames.add(model.name);
+    models.push(model);
+  }
+  let defaultModel = String(rawProfile?.defaultModel || '').trim();
+  if (models.length > 0 && !models.some((model) => model.name === defaultModel)) {
+    defaultModel = models[0].name;
+  }
+  return {
+    name: String(rawProfile?.name || '').trim(),
+    providerType,
+    apiKey: String(rawProfile?.apiKey || ''),
+    apiBase: String(rawProfile?.apiBase || '').trim(),
+    defaultModel,
+    models,
+    services: {
+      searchBase: String(rawProfile?.services?.searchBase || '').trim(),
+      searchApiKey: String(rawProfile?.services?.searchApiKey || ''),
+      fetchBase: String(rawProfile?.services?.fetchBase || '').trim(),
+      fetchApiKey: String(rawProfile?.services?.fetchApiKey || ''),
+    },
+  };
+}
+
 function loadModelConfig() {
   try {
     if (fs.existsSync(MODEL_CONFIG_PATH)) {
@@ -818,6 +897,24 @@ function loadCodexConfig() {
   return JSON.parse(JSON.stringify(DEFAULT_CODEX_CONFIG));
 }
 
+function loadKimiConfig() {
+  try {
+    if (fs.existsSync(KIMI_CONFIG_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(KIMI_CONFIG_PATH, 'utf8'));
+      const profiles = Array.isArray(raw?.profiles)
+        ? raw.profiles.map((profile) => sanitizeKimiProfile(profile)).filter((profile) => profile.name)
+        : [];
+      const activeProfile = String(raw?.activeProfile || '').trim();
+      return {
+        mode: raw?.mode === 'custom' ? 'custom' : 'local',
+        activeProfile: profiles.some((profile) => profile.name === activeProfile) ? activeProfile : '',
+        profiles,
+      };
+    }
+  } catch {}
+  return JSON.parse(JSON.stringify(DEFAULT_KIMI_CONFIG));
+}
+
 function saveCodexConfig(config) {
   fs.writeFileSync(CODEX_CONFIG_PATH, JSON.stringify({
     mode: config.mode === 'custom' ? 'custom' : 'local',
@@ -828,6 +925,18 @@ function saveCodexConfig(config) {
       apiBase: String(profile?.apiBase || '').trim(),
     })).filter((profile) => profile.name) : [],
     enableSearch: false,
+  }, null, 2));
+}
+
+function saveKimiConfig(config) {
+  const profiles = Array.isArray(config?.profiles)
+    ? config.profiles.map((profile) => sanitizeKimiProfile(profile)).filter((profile) => profile.name)
+    : [];
+  const activeProfile = String(config?.activeProfile || '').trim();
+  fs.writeFileSync(KIMI_CONFIG_PATH, JSON.stringify({
+    mode: config?.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: profiles.some((profile) => profile.name === activeProfile) ? activeProfile : '',
+    profiles,
   }, null, 2));
 }
 
@@ -851,6 +960,33 @@ function getCodexConfigMasked() {
 function maskSecret(str) {
   if (!str || str.length <= 8) return str ? '****' : '';
   return str.slice(0, 4) + '****' + str.slice(-4);
+}
+
+function getKimiConfigMasked() {
+  const config = loadKimiConfig();
+  return {
+    mode: config.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: config.activeProfile || '',
+    profiles: (config.profiles || []).map((profile) => ({
+      name: profile.name,
+      providerType: profile.providerType || 'kimi',
+      apiKey: maskSecret(profile.apiKey),
+      apiBase: profile.apiBase || '',
+      defaultModel: profile.defaultModel || '',
+      models: (profile.models || []).map((model) => ({
+        name: model.name,
+        model: model.model,
+        maxContextSize: model.maxContextSize,
+        capabilities: Array.isArray(model.capabilities) ? [...model.capabilities] : [],
+      })),
+      services: {
+        searchBase: profile.services?.searchBase || '',
+        searchApiKey: maskSecret(profile.services?.searchApiKey || ''),
+        fetchBase: profile.services?.fetchBase || '',
+        fetchApiKey: maskSecret(profile.services?.fetchApiKey || ''),
+      },
+    })),
+  };
 }
 
 function getModelConfigMasked() {
@@ -961,6 +1097,7 @@ function handleSaveDevConfig(ws, msg) {
 }
 
 const CODEX_RUNTIME_HOME = path.join(CONFIG_DIR, 'codex-runtime-home');
+const KIMI_RUNTIME_DIR = path.join(CONFIG_DIR, 'kimi-runtime');
 
 function tomlString(value) {
   return JSON.stringify(String(value || ''));
@@ -997,6 +1134,100 @@ function prepareCodexCustomRuntime(config) {
     apiKey: activeProfile.apiKey,
     apiBase: activeProfile.apiBase,
     profileName: activeProfile.name,
+  };
+}
+
+function resolveActiveKimiProfile(config) {
+  if (!config || config.mode !== 'custom') return null;
+  const profiles = Array.isArray(config.profiles) ? config.profiles : [];
+  return profiles.find((profile) => profile.name === config.activeProfile) || null;
+}
+
+function buildKimiRuntimeConfig(profile) {
+  const defaultModel = profile.defaultModel || profile.models[0]?.name || '';
+  const providerName = 'cc-web';
+  const config = {
+    default_model: defaultModel,
+    providers: {
+      [providerName]: {
+        type: profile.providerType || 'kimi',
+        base_url: profile.apiBase,
+        api_key: profile.apiKey,
+      },
+    },
+    models: {},
+  };
+
+  for (const model of profile.models || []) {
+    const entry = {
+      provider: providerName,
+      model: model.model,
+      max_context_size: model.maxContextSize,
+    };
+    if (Array.isArray(model.capabilities) && model.capabilities.length > 0) {
+      entry.capabilities = [...model.capabilities];
+    }
+    config.models[model.name] = entry;
+  }
+
+  const searchBase = String(profile.services?.searchBase || '').trim();
+  const searchApiKey = String(profile.services?.searchApiKey || '');
+  const fetchBase = String(profile.services?.fetchBase || '').trim();
+  const fetchApiKey = String(profile.services?.fetchApiKey || '');
+  if (searchBase && searchApiKey) {
+    config.services = config.services || {};
+    config.services.moonshot_search = {
+      base_url: searchBase,
+      api_key: searchApiKey,
+    };
+  }
+  if (fetchBase && fetchApiKey) {
+    config.services = config.services || {};
+    config.services.moonshot_fetch = {
+      base_url: fetchBase,
+      api_key: fetchApiKey,
+    };
+  }
+
+  return config;
+}
+
+function prepareKimiCustomRuntime(config) {
+  if (!config || config.mode !== 'custom') return { mode: 'local' };
+  const activeProfile = resolveActiveKimiProfile(config);
+  if (!activeProfile) {
+    return { error: 'Kimi 自定义配置缺少已激活的 Profile。请先在设置中创建并激活一个 Kimi Profile。' };
+  }
+  if (!activeProfile.apiKey || !activeProfile.apiBase) {
+    return { error: `Kimi Profile「${activeProfile.name}」缺少 API Key 或 API Base URL。` };
+  }
+  if (!Array.isArray(activeProfile.models) || activeProfile.models.length === 0) {
+    return { error: `Kimi Profile「${activeProfile.name}」至少需要配置一个模型。` };
+  }
+  if (!activeProfile.defaultModel || !activeProfile.models.some((model) => model.name === activeProfile.defaultModel)) {
+    return { error: `Kimi Profile「${activeProfile.name}」缺少有效的默认模型。` };
+  }
+
+  const searchBase = String(activeProfile.services?.searchBase || '').trim();
+  const searchApiKey = String(activeProfile.services?.searchApiKey || '');
+  if ((searchBase && !searchApiKey) || (!searchBase && searchApiKey)) {
+    return { error: `Kimi Profile「${activeProfile.name}」的搜索服务配置不完整。` };
+  }
+  const fetchBase = String(activeProfile.services?.fetchBase || '').trim();
+  const fetchApiKey = String(activeProfile.services?.fetchApiKey || '');
+  if ((fetchBase && !fetchApiKey) || (!fetchBase && fetchApiKey)) {
+    return { error: `Kimi Profile「${activeProfile.name}」的抓取服务配置不完整。` };
+  }
+
+  fs.mkdirSync(KIMI_RUNTIME_DIR, { recursive: true });
+  const configFilePath = path.join(KIMI_RUNTIME_DIR, 'config.json');
+  fs.writeFileSync(configFilePath, JSON.stringify(buildKimiRuntimeConfig(activeProfile), null, 2));
+
+  return {
+    mode: 'custom',
+    configFilePath,
+    profileName: activeProfile.name,
+    defaultModel: activeProfile.defaultModel,
   };
 }
 
@@ -2212,6 +2443,38 @@ const server = http.createServer((req, res) => {
 // === WebSocket Server ===
 const wss = new WebSocketServer({ server });
 
+let startupErrorHandled = false;
+function handleStartupError(error, source = 'server') {
+  const err = error instanceof Error ? error : new Error(String(error || '未知启动错误'));
+  plog('ERROR', 'server_start_failed', {
+    source,
+    code: err.code || null,
+    message: err.message || String(err),
+    host: HOST,
+    port: PORT,
+  });
+
+  if (!startupErrorHandled) {
+    startupErrorHandled = true;
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[ERROR] 端口被占用：${HOST}:${PORT}`);
+      console.error('已有进程正在监听这个端口。请关闭现有进程，或在 .env 中修改 PORT 后重试。');
+    } else {
+      console.error(`[ERROR] CC-Web 启动失败：${err.message || String(err)}`);
+    }
+  }
+
+  setTimeout(() => process.exit(1), 10);
+}
+
+server.on('error', (error) => {
+  handleStartupError(error, 'http');
+});
+
+wss.on('error', (error) => {
+  handleStartupError(error, 'websocket');
+});
+
 wss.on('connection', (ws, req) => {
   ws._req = req;
   const clientIP = getClientIP(ws);
@@ -2319,6 +2582,12 @@ wss.on('connection', (ws, req) => {
       case 'save_codex_config':
         handleSaveCodexConfig(ws, msg.config);
         break;
+      case 'get_kimi_config':
+        wsSend(ws, { type: 'kimi_config', config: getKimiConfigMasked() });
+        break;
+      case 'save_kimi_config':
+        handleSaveKimiConfig(ws, msg.config);
+        break;
       case 'list_agent_models':
         handleListAgentModels(ws, msg);
         break;
@@ -2333,6 +2602,9 @@ wss.on('connection', (ws, req) => {
         break;
       case 'read_codex_local_config':
         handleReadCodexLocalConfig(ws);
+        break;
+      case 'read_kimi_local_config':
+        handleReadKimiLocalConfig(ws);
         break;
       case 'save_local_snapshot':
         handleSaveLocalSnapshot(ws, msg);
@@ -2596,6 +2868,50 @@ function handleSaveCodexConfig(ws, newConfig) {
   });
 }
 
+function mergeMaskedSecret(nextValue, currentValue) {
+  const raw = String(nextValue || '');
+  if (!raw) return '';
+  return raw.includes('****') ? String(currentValue || '') : raw;
+}
+
+function handleSaveKimiConfig(ws, newConfig) {
+  if (!newConfig || typeof newConfig !== 'object') {
+    return wsSend(ws, { type: 'error', message: '无效的 Kimi 配置' });
+  }
+
+  const current = loadKimiConfig();
+  const oldProfiles = Array.isArray(current.profiles) ? current.profiles : [];
+  const mergedProfiles = [];
+  for (const rawProfile of Array.isArray(newConfig.profiles) ? newConfig.profiles : []) {
+    const sanitized = sanitizeKimiProfile(rawProfile);
+    if (!sanitized.name) continue;
+    const originalName = String(rawProfile?._originalName || rawProfile?.name || '').trim();
+    const oldProfile = oldProfiles.find((profile) => profile.name === originalName || profile.name === sanitized.name) || null;
+    sanitized.apiKey = mergeMaskedSecret(rawProfile?.apiKey, oldProfile?.apiKey);
+    sanitized.services.searchApiKey = mergeMaskedSecret(rawProfile?.services?.searchApiKey, oldProfile?.services?.searchApiKey);
+    sanitized.services.fetchApiKey = mergeMaskedSecret(rawProfile?.services?.fetchApiKey, oldProfile?.services?.fetchApiKey);
+    mergedProfiles.push(sanitized);
+  }
+
+  const merged = {
+    mode: newConfig.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: String(newConfig.activeProfile || '').trim(),
+    profiles: mergedProfiles,
+  };
+  if (merged.mode === 'custom' && merged.profiles.length > 0 && !merged.profiles.some((profile) => profile.name === merged.activeProfile)) {
+    merged.activeProfile = merged.profiles[0].name;
+  }
+
+  saveKimiConfig(merged);
+  plog('INFO', 'kimi_config_saved', {
+    mode: merged.mode,
+    activeProfile: merged.activeProfile || null,
+    profileCount: merged.profiles.length,
+  });
+  wsSend(ws, { type: 'kimi_config', config: getKimiConfigMasked() });
+  wsSend(ws, { type: 'system_message', message: 'Kimi 配置已保存' });
+}
+
 // === Local Config Snapshot Handlers ===
 function handleReadClaudeLocalConfig(ws) {
   let settings = {};
@@ -2649,6 +2965,30 @@ function handleReadCodexLocalConfig(ws) {
   const result = { type: 'codex_local_config', config, sourceFound, hasApiKey };
   if (!hasApiKey) result.warning = '本机使用登录态认证，未检测到 API Key';
   wsSend(ws, result);
+}
+
+function handleReadKimiLocalConfig(ws) {
+  const config = readKimiLocalConfigFile();
+  wsSend(ws, {
+    type: 'kimi_local_config',
+    config: {
+      sourcePath: config.sourcePath || '',
+      defaultModel: config.defaultModel || '',
+      models: Array.isArray(config.models) ? [...config.models] : [],
+      providerName: config.providerName || '',
+      providerType: config.providerType || '',
+      apiKey: config.apiKey || '',
+      apiBase: config.apiBase || '',
+      modelName: config.modelName || '',
+      maxContextSize: config.maxContextSize || '',
+      capabilities: Array.isArray(config.capabilities) ? [...config.capabilities] : [],
+      searchBase: config.searchBase || '',
+      searchApiKey: config.searchApiKey || '',
+      fetchBase: config.fetchBase || '',
+      fetchApiKey: config.fetchApiKey || '',
+    },
+    sourceFound: !!config.sourceFound,
+  });
 }
 
 function handleSaveLocalSnapshot(ws, msg) {
@@ -3214,6 +3554,33 @@ function sqlQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function sanitizeUnicodeText(value) {
+  const input = String(value || '');
+  let result = '';
+  let changed = false;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = input.charCodeAt(i + 1);
+      if (i + 1 < input.length && next >= 0xDC00 && next <= 0xDFFF) {
+        result += input[i] + input[i + 1];
+        i++;
+        continue;
+      }
+      result += '\uFFFD';
+      changed = true;
+      continue;
+    }
+    if (code >= 0xDC00 && code <= 0xDFFF) {
+      result += '\uFFFD';
+      changed = true;
+      continue;
+    }
+    result += input[i];
+  }
+  return changed ? result : input;
+}
+
 function normalizeComparablePath(targetPath) {
   const resolved = path.resolve(String(targetPath || ''));
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
@@ -3358,7 +3725,7 @@ function handleRenameSession(ws, sessionId, title) {
   if (!sessionId || !title) return;
   const session = loadSession(sessionId);
   if (session) {
-    session.title = String(title).slice(0, 100);
+    session.title = sanitizeUnicodeText(title).slice(0, 100);
     session.updated = new Date().toISOString();
     saveSession(session);
     sendSessionList(ws);
@@ -3422,7 +3789,8 @@ function handleAbort(ws) {
 function handleMessage(ws, msg, options = {}) {
   const { text, sessionId, mode } = msg;
   const { hideInHistory = false } = options;
-  const textValue = typeof text === 'string' ? text : '';
+  const rawTextValue = typeof text === 'string' ? text : '';
+  const textValue = sanitizeUnicodeText(rawTextValue);
   const attachments = Array.isArray(msg.attachments) ? msg.attachments.slice(0, MAX_MESSAGE_ATTACHMENTS) : [];
   const normalizedText = textValue.trim();
   const resolvedAttachments = resolveMessageAttachments(attachments);
@@ -3430,6 +3798,13 @@ function handleMessage(ws, msg, options = {}) {
     return wsSend(ws, { type: 'error', message: '图片附件已过期或不可用，请重新上传后再发送。' });
   }
   if (!normalizedText && resolvedAttachments.length === 0) return;
+  if (rawTextValue !== textValue) {
+    plog('WARN', 'message_unicode_sanitized', {
+      sessionId: sessionId ? String(sessionId).slice(0, 8) : null,
+      originalLength: rawTextValue.length,
+      sanitizedLength: textValue.length,
+    });
+  }
 
   const savedAttachments = resolvedAttachments.map((attachment) => ({
     id: attachment.id,
@@ -3769,6 +4144,8 @@ const {
   applyCustomTemplateToSettings,
   loadCodexConfig,
   prepareCodexCustomRuntime,
+  loadKimiConfig,
+  prepareKimiCustomRuntime,
   wsSend,
   truncateObj,
   sanitizeToolInput,
@@ -4064,65 +4441,289 @@ function stripTomlStringLiteral(raw) {
   return match ? match[1] : value;
 }
 
-function parseKimiTomlModels(rawToml) {
-  const raw = String(rawToml || '');
-  const models = new Set();
-  let defaultModel = '';
+function stripTomlComment(rawLine) {
+  let result = '';
+  let quote = '';
+  let escaped = false;
+  for (const ch of String(rawLine || '')) {
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      result += ch;
+      if (quote === '"' && ch === '\\') {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      quote = ch;
+      result += ch;
+      continue;
+    }
+    if (ch === '#') break;
+    result += ch;
+  }
+  return result.trim();
+}
 
-  const defaultMatch = raw.match(/^\s*default_model\s*=\s*("[^"]+"|'[^']+'|[^\r\n#]+)/m);
-  if (defaultMatch) defaultModel = stripTomlStringLiteral(defaultMatch[1]);
+function splitTomlArrayItems(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text.startsWith('[') || !text.endsWith(']')) return [];
+  const body = text.slice(1, -1);
+  const items = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  for (const ch of body) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      current += ch;
+      if (quote === '"' && ch === '\\') {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ',') {
+      const item = current.trim();
+      if (item) items.push(item);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  const tail = current.trim();
+  if (tail) items.push(tail);
+  return items;
+}
 
-  const sectionPattern = /^\s*\[models\.(?:"([^"]+)"|'([^']+)'|([^[\]\s#]+))\]\s*$/gm;
-  let match;
-  while ((match = sectionPattern.exec(raw)) !== null) {
-    const model = String(match[1] || match[2] || match[3] || '').trim();
-    if (model) models.add(model);
+function parseKimiTomlValue(rawValue) {
+  const value = stripTomlComment(rawValue);
+  if (!value) return '';
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith('\'') && value.endsWith('\''))) {
+    return stripTomlStringLiteral(value);
+  }
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return splitTomlArrayItems(value).map((item) => stripTomlStringLiteral(item));
+  }
+  if (/^-?\d+$/.test(value)) return parseInt(value, 10);
+  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === 'true';
+  return value;
+}
+
+function parseKimiTomlConfig(rawToml) {
+  const parsed = {
+    default_model: '',
+    providers: {},
+    models: {},
+    services: {},
+  };
+  let sectionType = '';
+  let sectionName = '';
+
+  for (const rawLine of String(rawToml || '').split(/\r?\n/)) {
+    const line = stripTomlComment(rawLine);
+    if (!line) continue;
+    if (/^\s*\[\[/.test(line)) {
+      sectionType = '';
+      sectionName = '';
+      continue;
+    }
+
+    let match = line.match(/^\s*\[providers\.(?:"([^"]+)"|'([^']+)'|([^[\]\s#]+))\]\s*$/);
+    if (match) {
+      sectionType = 'provider';
+      sectionName = String(match[1] || match[2] || match[3] || '').trim();
+      if (sectionName && !parsed.providers[sectionName]) parsed.providers[sectionName] = {};
+      continue;
+    }
+
+    match = line.match(/^\s*\[models\.(?:"([^"]+)"|'([^']+)'|([^[\]\s#]+))\]\s*$/);
+    if (match) {
+      sectionType = 'model';
+      sectionName = String(match[1] || match[2] || match[3] || '').trim();
+      if (sectionName && !parsed.models[sectionName]) parsed.models[sectionName] = {};
+      continue;
+    }
+
+    if (/^\s*\[services\.moonshot_search\]\s*$/.test(line)) {
+      sectionType = 'service';
+      sectionName = 'moonshot_search';
+      parsed.services[sectionName] = parsed.services[sectionName] || {};
+      continue;
+    }
+
+    if (/^\s*\[services\.moonshot_fetch\]\s*$/.test(line)) {
+      sectionType = 'service';
+      sectionName = 'moonshot_fetch';
+      parsed.services[sectionName] = parsed.services[sectionName] || {};
+      continue;
+    }
+
+    const pair = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.+)$/);
+    if (!pair) continue;
+    const key = pair[1];
+    const value = parseKimiTomlValue(pair[2]);
+    if (!sectionType) {
+      if (key === 'default_model') parsed.default_model = String(value || '').trim();
+      continue;
+    }
+    if (sectionType === 'provider' && sectionName) {
+      parsed.providers[sectionName][key] = value;
+      continue;
+    }
+    if (sectionType === 'model' && sectionName) {
+      parsed.models[sectionName][key] = value;
+      continue;
+    }
+    if (sectionType === 'service' && sectionName) {
+      parsed.services[sectionName][key] = value;
+    }
   }
 
+  return parsed;
+}
+
+function normalizeKimiConfigShape(rawConfig, options = {}) {
+  const providers = rawConfig?.providers && typeof rawConfig.providers === 'object' ? rawConfig.providers : {};
+  const models = rawConfig?.models && typeof rawConfig.models === 'object' ? rawConfig.models : {};
+  const services = rawConfig?.services && typeof rawConfig.services === 'object' ? rawConfig.services : {};
+  const modelNames = Object.keys(models).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  const requestedDefaultModel = String(rawConfig?.default_model || rawConfig?.defaultModel || '').trim();
+  const defaultModel = modelNames.includes(requestedDefaultModel) ? requestedDefaultModel : (modelNames[0] || requestedDefaultModel || '');
+  const activeModel = defaultModel ? (models[defaultModel] || null) : null;
+  const providerName = String(activeModel?.provider || '').trim();
+  const provider = providerName ? (providers[providerName] || {}) : {};
+  const parsedMaxContext = parseInt(activeModel?.max_context_size ?? activeModel?.maxContextSize ?? '', 10);
+  const searchService = services.moonshot_search || {};
+  const fetchService = services.moonshot_fetch || {};
+
   return {
-    models: Array.from(models).sort((a, b) => a.localeCompare(b)),
+    sourceFound: !!options.sourceFound,
+    sourcePath: options.sourcePath || '',
     defaultModel,
-    sourceFound: raw.trim().length > 0,
-    sourcePath: '',
+    models: modelNames,
+    providerName,
+    providerType: String(provider?.type || '').trim(),
+    apiBase: String(provider?.base_url || provider?.baseUrl || '').trim(),
+    apiKey: String(provider?.api_key || provider?.apiKey || ''),
+    modelName: String(activeModel?.model || '').trim(),
+    maxContextSize: Number.isFinite(parsedMaxContext) && parsedMaxContext > 0 ? parsedMaxContext : '',
+    capabilities: normalizeKimiCapabilityList(activeModel?.capabilities),
+    searchBase: String(searchService?.base_url || searchService?.baseUrl || '').trim(),
+    searchApiKey: String(searchService?.api_key || searchService?.apiKey || ''),
+    fetchBase: String(fetchService?.base_url || fetchService?.baseUrl || '').trim(),
+    fetchApiKey: String(fetchService?.api_key || fetchService?.apiKey || ''),
   };
 }
 
-function readKimiModelCatalog() {
+function readKimiConfigFromFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  if (/\.json$/i.test(filePath)) {
+    return normalizeKimiConfigShape(JSON.parse(raw), { sourceFound: true, sourcePath: filePath });
+  }
+  return normalizeKimiConfigShape(parseKimiTomlConfig(raw), { sourceFound: true, sourcePath: filePath });
+}
+
+function readKimiLocalConfigFile() {
   const shareDir = getKimiShareDir();
   const tomlPath = path.join(shareDir, 'config.toml');
   if (fs.existsSync(tomlPath)) {
-    const parsed = parseKimiTomlModels(fs.readFileSync(tomlPath, 'utf8'));
-    parsed.sourcePath = tomlPath;
-    return parsed;
+    try {
+      return readKimiConfigFromFile(tomlPath);
+    } catch {}
   }
 
   const legacyJsonPath = path.join(shareDir, 'config.json');
   if (fs.existsSync(legacyJsonPath)) {
     try {
-      const json = JSON.parse(fs.readFileSync(legacyJsonPath, 'utf8'));
-      const models = Object.keys(json?.models || {}).filter(Boolean).sort((a, b) => a.localeCompare(b));
-      return {
-        models,
-        defaultModel: String(json?.default_model || '').trim(),
-        sourceFound: true,
-        sourcePath: legacyJsonPath,
-      };
+      return readKimiConfigFromFile(legacyJsonPath);
     } catch {}
   }
 
   return {
-    models: [],
-    defaultModel: '',
     sourceFound: false,
     sourcePath: tomlPath,
+    defaultModel: '',
+    models: [],
+    providerName: '',
+    providerType: '',
+    apiBase: '',
+    apiKey: '',
+    modelName: '',
+    maxContextSize: '',
+    capabilities: [],
+    searchBase: '',
+    searchApiKey: '',
+    fetchBase: '',
+    fetchApiKey: '',
+  };
+}
+
+function getKimiEffectiveModelCatalog() {
+  const kimiConfig = loadKimiConfig();
+  if (kimiConfig.mode === 'custom') {
+    const activeProfile = resolveActiveKimiProfile(kimiConfig);
+    if (!activeProfile) {
+      return {
+        sourceKind: 'custom',
+        sourceFound: false,
+        sourcePath: '',
+        models: [],
+        defaultModel: '',
+        profileName: '',
+      };
+    }
+    return {
+      sourceKind: 'custom',
+      sourceFound: true,
+      sourcePath: `cc-web Kimi Profile「${activeProfile.name}」`,
+      models: (activeProfile.models || []).map((model) => model.name).filter(Boolean),
+      defaultModel: activeProfile.defaultModel || activeProfile.models[0]?.name || '',
+      profileName: activeProfile.name,
+    };
+  }
+
+  const localConfig = readKimiLocalConfigFile();
+  return {
+    sourceKind: 'local',
+    sourceFound: !!localConfig.sourceFound,
+    sourcePath: localConfig.sourcePath || '',
+    models: Array.isArray(localConfig.models) ? [...localConfig.models] : [],
+    defaultModel: localConfig.defaultModel || '',
+    profileName: '',
   };
 }
 
 function listKimiModels() {
   try {
-    const catalog = readKimiModelCatalog();
+    const catalog = getKimiEffectiveModelCatalog();
     if (catalog.models.length > 0) {
       return { success: true, models: catalog.models, message: '' };
+    }
+    if (catalog.sourceKind === 'custom') {
+      return {
+        success: false,
+        models: [],
+        message: catalog.profileName
+          ? `Kimi Profile「${catalog.profileName}」未配置可用模型。`
+          : 'Kimi 自定义配置缺少已激活的 Profile。',
+      };
     }
     if (catalog.sourceFound) {
       return {
