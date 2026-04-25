@@ -1073,6 +1073,13 @@ body.session-loading-active {
   background: transparent;
   border: none;
 }
+.msg-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: calc(100% - 42px);
+}
 
 .msg-bubble {
   padding: 12px 16px;
@@ -1114,6 +1121,33 @@ body.session-loading-active {
   border: 1px solid var(--border-color);
   border-bottom-left-radius: 4px;
   color: var(--text-primary);
+}
+.msg-actions {
+  display: flex;
+}
+.msg.user .msg-actions {
+  justify-content: flex-end;
+}
+.msg-resend-btn {
+  appearance: none;
+  border: 1px solid rgba(192, 85, 58, 0.22);
+  background: rgba(255, 248, 243, 0.92);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, opacity 0.18s ease;
+}
+.msg-resend-btn:hover {
+  background: rgba(255, 240, 232, 0.98);
+  border-color: rgba(192, 85, 58, 0.34);
+}
+.msg-resend-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .assistant-steps {
   display: flex;

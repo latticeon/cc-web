@@ -2145,6 +2145,7 @@
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
     ensureStreamingTextStep(msgEl);
     messagesDiv.appendChild(msgEl);
+    syncLastUserResendAction();
     scrollToBottom();
   }
 
@@ -2167,6 +2168,7 @@
     if (sessionId) currentSessionId = sessionId;
     pendingText = '';
     activeToolCalls.clear();
+    syncLastUserResendAction();
   }
 
   // --- Rendering ---
@@ -2495,7 +2497,47 @@
     }
   }
 
-  function createMsgElement(role, content, attachments = []) {
+  function cloneResendAttachments(attachments) {
+    return Array.isArray(attachments) ? attachments.map((attachment) => ({ ...attachment })) : [];
+  }
+
+  function syncLastUserResendAction() {
+    const messageNodes = Array.from(messagesDiv.children).filter((node) => node.classList && node.classList.contains('msg'));
+    messageNodes.forEach((node) => {
+      const btn = node.querySelector('.msg-resend-btn');
+      if (!btn) return;
+      btn.hidden = true;
+      btn.disabled = true;
+    });
+    const lastMessage = messageNodes[messageNodes.length - 1];
+    if (!lastMessage || !lastMessage.classList.contains('user')) return;
+    const lastBtn = lastMessage.querySelector('.msg-resend-btn');
+    if (!lastBtn) return;
+    lastBtn.hidden = false;
+    lastBtn.disabled = isGenerating || isBlockingSessionLoad();
+  }
+
+  function resendUserMessage(payload) {
+    const text = typeof payload?.text === 'string' ? payload.text : '';
+    const attachments = cloneResendAttachments(payload?.attachments || []);
+    if ((!text.trim() && attachments.length === 0) || !currentSessionId || isGenerating || isBlockingSessionLoad()) return;
+
+    hideCmdMenu();
+    hideOptionPicker();
+    const welcome = messagesDiv.querySelector('.welcome-msg');
+    if (welcome) welcome.remove();
+
+    const nextPayload = { text, attachments: cloneResendAttachments(attachments) };
+    messagesDiv.appendChild(createMsgElement('user', text, attachments, { resendPayload: nextPayload }));
+    syncLastUserResendAction();
+    scrollToBottom();
+
+    send({ type: 'message', text, attachments, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
+    startGenerating();
+  }
+
+  function createMsgElement(role, content, attachments = [], options = {}) {
+    const { resendPayload = null } = options;
     const div = document.createElement('div');
     div.className = `msg ${role}${role === 'assistant' ? ' agent-' + currentAgent : ''}`;
 
@@ -2514,6 +2556,9 @@
     } else {
       avatar.innerHTML = getAgentAvatarHtml(currentAgent);
     }
+
+    const main = document.createElement('div');
+    main.className = 'msg-main';
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
@@ -2535,8 +2580,24 @@
       }
     }
 
+    main.appendChild(bubble);
+    if (role === 'user' && resendPayload) {
+      div._resendPayload = deepClone(resendPayload);
+      const actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      const resendBtn = document.createElement('button');
+      resendBtn.type = 'button';
+      resendBtn.className = 'msg-resend-btn';
+      resendBtn.textContent = '重新发送';
+      resendBtn.hidden = true;
+      resendBtn.disabled = true;
+      resendBtn.addEventListener('click', () => resendUserMessage(div._resendPayload));
+      actions.appendChild(resendBtn);
+      main.appendChild(actions);
+    }
+
     div.appendChild(avatar);
-    div.appendChild(bubble);
+    div.appendChild(main);
     return div;
   }
 
@@ -2628,8 +2689,17 @@
     return section;
   }
 
-	  function buildMsgElement(m) {
-	    const el = createMsgElement(m.role, m.role === 'assistant' ? '' : m.content, m.role === 'assistant' ? [] : (m.attachments || []));
+	  function buildMsgElement(m, options = {}) {
+	    const { allowResend = false } = options;
+	    const resendPayload = allowResend && m.role === 'user'
+	      ? { text: m.content || '', attachments: cloneResendAttachments(m.attachments || []) }
+	      : null;
+	    const el = createMsgElement(
+	      m.role,
+	      m.role === 'assistant' ? '' : m.content,
+	      m.role === 'assistant' ? [] : (m.attachments || []),
+	      { resendPayload }
+	    );
 	    if (m.role === 'assistant') {
 	      const bubble = el.querySelector('.msg-bubble');
 	      renderAssistantStepsIntoBubble(bubble, getAssistantMessageSteps(m), m.attachments || [], { complete: true, running: false });
@@ -2643,12 +2713,14 @@
     messagesDiv.innerHTML = '';
     if (messages.length === 0) {
       messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
+      syncLastUserResendAction();
       return;
     }
     if (options.immediate) {
       const frag = document.createDocumentFragment();
-      messages.forEach((message) => frag.appendChild(buildMsgElement(message)));
+      messages.forEach((message, index) => frag.appendChild(buildMsgElement(message, { allowResend: index === messages.length - 1 })));
       messagesDiv.appendChild(frag);
+      syncLastUserResendAction();
       scrollToBottom();
       return;
     }
@@ -2668,8 +2740,9 @@
 
     // Render first batch immediately
     const frag0 = document.createDocumentFragment();
-    for (let i = batches[0][0]; i < batches[0][1]; i++) frag0.appendChild(buildMsgElement(messages[i]));
+    for (let i = batches[0][0]; i < batches[0][1]; i++) frag0.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1 }));
     messagesDiv.appendChild(frag0);
+    syncLastUserResendAction();
     scrollToBottom();
 
     // Render remaining batches asynchronously, prepending each
@@ -2683,10 +2756,11 @@
         const prevHeight = messagesDiv.scrollHeight;
         const prevScrollTop = messagesDiv.scrollTop;
         const frag = document.createDocumentFragment();
-        for (let i = start; i < end; i++) frag.appendChild(buildMsgElement(messages[i]));
+        for (let i = start; i < end; i++) frag.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1 }));
         messagesDiv.insertBefore(frag, messagesDiv.firstChild);
         // Compensate scrollTop so visible area stays unchanged
         messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
+        syncLastUserResendAction();
         updateScrollbar();
       }, delay);
     }
@@ -2702,6 +2776,7 @@
     messages.forEach((m) => frag.appendChild(buildMsgElement(m)));
     if (!preserveScroll) {
       messagesDiv.insertBefore(frag, messagesDiv.firstChild);
+      syncLastUserResendAction();
       if (!skipScrollbar) updateScrollbar();
       return;
     }
@@ -2709,6 +2784,7 @@
     const prevScrollTop = messagesDiv.scrollTop;
     messagesDiv.insertBefore(frag, messagesDiv.firstChild);
     messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
+    syncLastUserResendAction();
     if (!skipScrollbar) updateScrollbar();
   }
 
@@ -3038,6 +3114,7 @@
     const welcome = messagesDiv.querySelector('.welcome-msg');
     if (welcome) welcome.remove();
     messagesDiv.appendChild(createMsgElement('system', message));
+    syncLastUserResendAction();
     scrollToBottom();
   }
 
@@ -3046,6 +3123,7 @@
     div.className = 'msg system';
     div.innerHTML = `<div class="msg-bubble" style="border-color:var(--danger);color:var(--danger)">⚠ ${escapeHtml(message)}</div>`;
     messagesDiv.appendChild(div);
+    syncLastUserResendAction();
     scrollToBottom();
   }
 
@@ -3618,7 +3696,10 @@
     const welcome = messagesDiv.querySelector('.welcome-msg');
     if (welcome) welcome.remove();
     const attachments = pendingAttachments.map((attachment) => ({ ...attachment }));
-    messagesDiv.appendChild(createMsgElement('user', text, attachments));
+    messagesDiv.appendChild(createMsgElement('user', text, attachments, {
+      resendPayload: { text, attachments: cloneResendAttachments(attachments) },
+    }));
+    syncLastUserResendAction();
     scrollToBottom();
 
     send({ type: 'message', text, attachments, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
