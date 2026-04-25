@@ -1679,6 +1679,68 @@ function splitHistoryMessages(messages) {
 }
 
 const IS_WIN = process.platform === 'win32';
+const RUNTIME_IDENTITY_AGENTS = new Set(['codex', 'kimi', 'opencode']);
+
+function normalizeProcessStartMarker(value) {
+  const marker = String(value || '').trim();
+  return marker || null;
+}
+
+function getWindowsProcessSnapshot(pid) {
+  const script = [
+    `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction Stop`,
+    '$start = if ($p.CreationDate) { [System.Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate).ToUniversalTime().ToString(\'o\') } else { \'\' }',
+    '[pscustomobject]@{ startMarker = $start; commandLine = [string]($p.CommandLine ?? \'\') } | ConvertTo-Json -Compress',
+  ].join('; ');
+  try {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 4000,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0) {
+      return { running: false, startMarker: null, commandLine: '' };
+    }
+    const parsed = JSON.parse(String(result.stdout || '{}').trim() || '{}');
+    return {
+      running: true,
+      startMarker: normalizeProcessStartMarker(parsed?.startMarker),
+      commandLine: String(parsed?.commandLine || '').trim(),
+    };
+  } catch {
+    return { running: false, startMarker: null, commandLine: '' };
+  }
+}
+
+function getPosixProcessSnapshot(pid) {
+  try {
+    const startResult = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 2000,
+      windowsHide: true,
+    });
+    const commandResult = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 2000,
+      windowsHide: true,
+    });
+    return {
+      running: startResult.status === 0 || commandResult.status === 0,
+      startMarker: normalizeProcessStartMarker(startResult.stdout),
+      commandLine: String(commandResult.stdout || '').trim(),
+    };
+  } catch {
+    return { running: false, startMarker: null, commandLine: '' };
+  }
+}
+
+function getProcessSnapshot(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    return { running: false, startMarker: null, commandLine: '' };
+  }
+  return IS_WIN ? getWindowsProcessSnapshot(numericPid) : getPosixProcessSnapshot(numericPid);
+}
 
 function isProcessRunning(pid) {
   try {
@@ -1699,6 +1761,98 @@ function killProcess(pid, force = false) {
       process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
     }
   } catch {}
+}
+
+function shouldValidateRuntimeIdCommandLine(agent, runtimeId) {
+  const normalizedAgent = normalizeAgent(agent);
+  const marker = String(runtimeId || '').trim();
+  return !!marker && RUNTIME_IDENTITY_AGENTS.has(normalizedAgent);
+}
+
+function readRunProcessMeta(dir) {
+  try {
+    const metaPath = path.join(dir, 'process.json');
+    let meta = null;
+    if (fs.existsSync(metaPath)) {
+      meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    }
+    const pidPath = path.join(dir, 'pid');
+    const pidRaw = meta?.pid ?? (fs.existsSync(pidPath) ? fs.readFileSync(pidPath, 'utf8') : '');
+    const pid = parseInt(String(pidRaw || '').trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return {
+      pid,
+      agent: normalizeAgent(meta?.agent || ''),
+      runtimeId: String(meta?.runtimeId || '').trim() || null,
+      processStartMarker: normalizeProcessStartMarker(meta?.processStartMarker),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeRunProcessMeta(dir, meta) {
+  try {
+    fs.writeFileSync(path.join(dir, 'process.json'), JSON.stringify({
+      pid: Number(meta?.pid) || 0,
+      agent: normalizeAgent(meta?.agent || ''),
+      runtimeId: String(meta?.runtimeId || '').trim() || null,
+      processStartMarker: normalizeProcessStartMarker(meta?.processStartMarker),
+      capturedAt: new Date().toISOString(),
+    }, null, 2));
+  } catch {}
+}
+
+function getTrackedProcessStatus(entry) {
+  const pid = Number(entry?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { alive: false, reason: 'invalid_pid', snapshot: null };
+  }
+  if (!isProcessRunning(pid)) {
+    return { alive: false, reason: 'pid_missing', snapshot: null };
+  }
+
+  const expectedStartMarker = normalizeProcessStartMarker(entry?.processStartMarker);
+  const runtimeId = String(entry?.runtimeId || '').trim() || null;
+  const agent = normalizeAgent(entry?.agent || '');
+  const needsSnapshot = !!expectedStartMarker || shouldValidateRuntimeIdCommandLine(agent, runtimeId);
+
+  if (!needsSnapshot) {
+    return { alive: true, reason: 'pid_exists', snapshot: null };
+  }
+
+  const snapshot = getProcessSnapshot(pid);
+  if (!snapshot.running) {
+    return { alive: false, reason: 'pid_missing', snapshot };
+  }
+  if (expectedStartMarker) {
+    if (!snapshot.startMarker) {
+      return { alive: false, reason: 'start_marker_unavailable', snapshot };
+    }
+    if (snapshot.startMarker !== expectedStartMarker) {
+      return { alive: false, reason: 'start_marker_mismatch', snapshot };
+    }
+  } else if (shouldValidateRuntimeIdCommandLine(agent, runtimeId)) {
+    const commandLine = String(snapshot.commandLine || '');
+    if (!commandLine) {
+      return { alive: false, reason: 'runtime_id_unavailable', snapshot };
+    }
+    if (!commandLine.includes(runtimeId)) {
+      return { alive: false, reason: 'runtime_id_mismatch', snapshot };
+    }
+  }
+
+  return {
+    alive: true,
+    reason: expectedStartMarker ? 'start_marker_match' : 'runtime_id_match',
+    snapshot,
+  };
+}
+
+function getLiveProcessStatus(entry) {
+  if (entry?.identityCheck) return getTrackedProcessStatus(entry);
+  const alive = isProcessRunning(entry?.pid);
+  return { alive, reason: alive ? 'pid_exists' : 'pid_missing', snapshot: null };
 }
 
 function cleanRunDir(sessionId) {
@@ -2233,11 +2387,13 @@ function handleProcessComplete(sessionId, exitCode, signal) {
 // Global PID monitor: detect process completion (especially after server restart)
 setInterval(() => {
   for (const [sessionId, entry] of activeProcesses) {
-    if (entry.pid && !isProcessRunning(entry.pid)) {
+    const status = getLiveProcessStatus(entry);
+    if (entry.pid && !status.alive) {
       plog('INFO', 'pid_monitor_detected_exit', {
         sessionId: sessionId.slice(0, 8),
         pid: entry.pid,
         wsConnected: !!entry.ws,
+        reason: status.reason,
       });
       handleProcessComplete(sessionId, null, 'unknown (detected by monitor)');
     }
@@ -2256,22 +2412,55 @@ function recoverProcesses() {
     for (const dirName of entries) {
       const sessionId = dirName.replace('-run', '');
       const dir = path.join(SESSIONS_DIR, dirName);
-      const pidPath = path.join(dir, 'pid');
       const outputPath = path.join(dir, 'output.jsonl');
       const session = loadSession(sessionId);
+      if (!session) {
+        cleanRunDir(sessionId);
+        continue;
+      }
       const agent = getSessionAgent(session);
+      const runtimeId = getRuntimeSessionId(session);
+      const processMeta = readRunProcessMeta(dir);
 
-      if (!fs.existsSync(pidPath)) {
+      if (!processMeta) {
         cleanRunDir(sessionId);
         continue;
       }
 
-      const pid = parseInt(fs.readFileSync(pidPath, 'utf8'));
+      const pid = processMeta.pid;
+      const trackedEntry = {
+        pid,
+        agent,
+        runtimeId: processMeta.runtimeId || runtimeId || null,
+        processStartMarker: processMeta.processStartMarker,
+      };
+      const status = getTrackedProcessStatus(trackedEntry);
 
-      if (isProcessRunning(pid)) {
+      if (status.alive) {
         console.log(`[recovery] Re-attaching to session ${sessionId} (PID ${pid})`);
-        plog('INFO', 'recovery_alive', { sessionId: sessionId.slice(0, 8), pid, agent });
-        const entry = { pid, ws: null, agent, fullText: '', toolCalls: [], assistantSteps: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
+        plog('INFO', 'recovery_alive', {
+          sessionId: sessionId.slice(0, 8),
+          pid,
+          agent,
+          reason: status.reason,
+          runtimeId: trackedEntry.runtimeId,
+        });
+        const entry = {
+          pid,
+          ws: null,
+          agent,
+          runtimeId: trackedEntry.runtimeId,
+          processStartMarker: trackedEntry.processStartMarker,
+          identityCheck: true,
+          fullText: '',
+          toolCalls: [],
+          assistantSteps: [],
+          lastCost: null,
+          lastUsage: null,
+          lastError: null,
+          errorSent: false,
+          tailer: null,
+        };
         activeProcesses.set(sessionId, entry);
 
         if (fs.existsSync(outputPath)) {
@@ -2286,7 +2475,13 @@ function recoverProcesses() {
       } else {
         // Process finished while server was down — read all output and save
         console.log(`[recovery] Processing completed output for session ${sessionId}`);
-        plog('INFO', 'recovery_dead', { sessionId: sessionId.slice(0, 8), pid, agent });
+        plog('INFO', 'recovery_dead', {
+          sessionId: sessionId.slice(0, 8),
+          pid,
+          agent,
+          reason: status.reason,
+          runtimeId: trackedEntry.runtimeId,
+        });
         if (fs.existsSync(outputPath)) {
           const tempEntry = { pid: 0, ws: null, agent, fullText: '', toolCalls: [], assistantSteps: [], lastCost: null, lastUsage: null, lastError: null, errorSent: false, tailer: null };
           const content = fs.readFileSync(outputPath, 'utf8');
@@ -4048,13 +4243,23 @@ function handleMessage(ws, msg, options = {}) {
   closeParentStreams();
   spawnSettled = true;
 
+  const runtimeId = getRuntimeSessionId(session);
+  const processStartMarker = getProcessSnapshot(proc.pid).startMarker;
   fs.writeFileSync(path.join(dir, 'pid'), String(proc.pid));
+  writeRunProcessMeta(dir, {
+    pid: proc.pid,
+    agent: getSessionAgent(session),
+    runtimeId,
+    processStartMarker,
+  });
   proc.unref(); // Process survives Node.js exit
 
   plog('INFO', 'process_spawn', {
     sessionId: currentSessionId.slice(0, 8),
     pid: proc.pid,
     agent: getSessionAgent(session),
+    runtimeId,
+    processStartMarker,
     mode: spawnSpec.mode,
     model: session.model || 'default',
     resume: spawnSpec.resume,
@@ -4077,6 +4282,9 @@ function handleMessage(ws, msg, options = {}) {
     pid: proc.pid,
     ws,
     agent: getSessionAgent(session),
+    runtimeId,
+    processStartMarker,
+    identityCheck: false,
     cwd: spawnSpec.cwd,
     fullText: '',
     attachments: resolvedAttachments,
@@ -5608,11 +5816,12 @@ setInterval(() => {
   if (activeProcesses.size === 0) return;
   const procs = [];
   for (const [sid, entry] of activeProcesses) {
-    const alive = isProcessRunning(entry.pid);
+    const status = getLiveProcessStatus(entry);
     procs.push({
       sessionId: sid.slice(0, 8),
       pid: entry.pid,
-      alive,
+      alive: status.alive,
+      reason: status.reason,
       wsConnected: !!entry.ws,
       wsDisconnectTime: entry.wsDisconnectTime || null,
       responseLen: (entry.fullText || '').length,

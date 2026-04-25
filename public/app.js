@@ -2514,13 +2514,13 @@
     const lastBtn = lastMessage.querySelector('.msg-resend-btn');
     if (!lastBtn) return;
     lastBtn.hidden = false;
-    lastBtn.disabled = isGenerating || isBlockingSessionLoad();
+    lastBtn.disabled = isGenerating || !currentSessionId;
   }
 
   function resendUserMessage(payload) {
     const text = typeof payload?.text === 'string' ? payload.text : '';
     const attachments = cloneResendAttachments(payload?.attachments || []);
-    if ((!text.trim() && attachments.length === 0) || !currentSessionId || isGenerating || isBlockingSessionLoad()) return;
+    if ((!text.trim() && attachments.length === 0) || !currentSessionId || isGenerating) return;
 
     hideCmdMenu();
     hideOptionPicker();
