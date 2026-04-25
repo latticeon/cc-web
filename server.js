@@ -1679,7 +1679,7 @@ function splitHistoryMessages(messages) {
 }
 
 const IS_WIN = process.platform === 'win32';
-const RUNTIME_IDENTITY_AGENTS = new Set(['codex', 'kimi', 'opencode']);
+const RUNTIME_IDENTITY_AGENTS = new Set(['claude', 'codex', 'kimi', 'opencode']);
 
 function normalizeProcessStartMarker(value) {
   const marker = String(value || '').trim();
