@@ -11,6 +11,7 @@ const REPO_DIR = path.resolve(__dirname, '..');
 const SERVER_PATH = path.join(REPO_DIR, 'server.js');
 const MOCK_CLAUDE = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-claude.cmd' : 'mock-claude.js');
 const MOCK_CODEX = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-codex.cmd' : 'mock-codex.js');
+const MOCK_CODEBUDDY = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-codebuddy.cmd' : 'mock-codebuddy.js');
 const MOCK_KIMI = path.join(REPO_DIR, 'scripts', process.platform === 'win32' ? 'mock-kimi.cmd' : 'mock-kimi.js');
 
 function mkdirp(dir) {
@@ -354,6 +355,7 @@ async function main() {
     HOME: homeDir,
     CLAUDE_PATH: MOCK_CLAUDE,
     CODEX_PATH: MOCK_CODEX,
+    CODEBUDDY_PATH: MOCK_CODEBUDDY,
     KIMI_PATH: MOCK_KIMI,
   }, async () => {
     const { ws, messages, token } = await connectWs(port, password);
@@ -461,13 +463,82 @@ async function main() {
 	    const autoCompactResume = await nextMessage(messages, ws, (msg) => msg.type === 'system_message' && /按 Codex 压缩计划继续执行/.test(msg.message || ''));
 	    assert(/继续执行/.test(autoCompactResume.message || ''), 'Codex auto /compact should announce retry');
 	    // Some Codex builds won't echo the original prompt text as a text delta on retry; accept either.
-	    const autoCompactRetry = await nextMessage(messages, ws, (msg) => (
+    const autoCompactRetry = await nextMessage(messages, ws, (msg) => (
 	      (msg.type === 'text_delta' && /trigger codex context limit/.test(msg.text || '')) ||
 	      (msg.type === 'done' && msg.sessionId === autoCompactSession.sessionId)
 	    ), 20000);
 	    if (autoCompactRetry.type === 'text_delta') {
 	      assert(/trigger codex context limit/.test(autoCompactRetry.text || ''), 'Codex auto /compact should replay the failed prompt after compact');
 	    }
+
+    ws.send(JSON.stringify({ type: 'list_agent_models', agent: 'codebuddy', requestId: 'codebuddy-models' }));
+    const codebuddyModels = await nextMessage(messages, ws, (msg) => msg.type === 'agent_models_result' && msg.agent === 'codebuddy');
+    assert(codebuddyModels.success === true, 'CodeBuddy model list should load from CLI');
+    const codebuddyModelIds = (codebuddyModels.models || []).map((item) => typeof item === 'string' ? item : item?.id).filter(Boolean);
+    assert(codebuddyModelIds.includes('glm-5.1'), 'CodeBuddy model list missing glm-5.1');
+    assert(codebuddyModelIds.includes('glm-5.0'), 'CodeBuddy model list missing glm-5.0');
+
+    const codebuddyInitCwd = path.join(tempRoot, 'codebuddy-space');
+    mkdirp(codebuddyInitCwd);
+    ws.send(JSON.stringify({ type: 'new_session', agent: 'codebuddy', cwd: codebuddyInitCwd, mode: 'plan' }));
+    const codebuddySession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'codebuddy' && msg.cwd === codebuddyInitCwd);
+    assert(codebuddySession.mode === 'plan', 'CodeBuddy new_session should follow requested mode');
+
+    ws.send(JSON.stringify({ type: 'message', text: '/init', sessionId: codebuddySession.sessionId, mode: 'plan', agent: 'codebuddy' }));
+    const codebuddyInitSignal = await nextMessage(messages, ws, (msg) => (
+      (msg.type === 'system_message' && /AGENTS\.md/.test(msg.message || ''))
+      || (msg.type === 'done' && msg.sessionId === codebuddySession.sessionId)
+    ), 20000);
+    if (codebuddyInitSignal.type === 'system_message') {
+      assert(/AGENTS\.md/.test(codebuddyInitSignal.message || ''), 'CodeBuddy /init should announce AGENTS.md generation');
+      await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codebuddySession.sessionId, 20000);
+    }
+    assert(fs.existsSync(path.join(codebuddyInitCwd, 'AGENTS.md')), 'CodeBuddy /init should generate AGENTS.md in the workspace');
+
+    ws.send(JSON.stringify({ type: 'message', text: '/model glm-5.0', sessionId: codebuddySession.sessionId, mode: 'plan', agent: 'codebuddy' }));
+    const codebuddyModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'glm-5.0');
+    assert(codebuddyModelChanged.model === 'glm-5.0', 'CodeBuddy /model should accept arbitrary model names');
+
+    const codebuddyAttachment = await uploadAttachment(port, token, {
+      filename: 'codebuddy-test.png',
+      mime: 'image/png',
+      data: Buffer.from('codebuddy-image'),
+    });
+    ws.send(JSON.stringify({ type: 'message', text: 'first codebuddy prompt', attachments: [codebuddyAttachment], mode: 'yolo', agent: 'codebuddy' }));
+    const codebuddyImageSession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'codebuddy' && msg.title === 'first codebuddy prompt');
+    const runtimeModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'glm-5.1');
+    assert(runtimeModelChanged.model === 'glm-5.1', 'CodeBuddy runtime should report the effective default model');
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codebuddyImageSession.sessionId);
+
+    const storedCodebuddySession = JSON.parse(fs.readFileSync(path.join(sessionsDir, `${codebuddyImageSession.sessionId}.json`), 'utf8'));
+    assert(Array.isArray(storedCodebuddySession.messages?.[0]?.attachments) && storedCodebuddySession.messages[0].attachments.length === 1, 'CodeBuddy message should persist attachment metadata');
+    assert(storedCodebuddySession.codebuddySessionId, 'CodeBuddy session id should be persisted after first run');
+    const codebuddySessionIdBeforeMode = storedCodebuddySession.codebuddySessionId;
+
+    const codebuddySpawnLine = fs.readFileSync(path.join(logsDir, 'process.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .find((line) => line.includes(`"event":"process_spawn"`) && line.includes(codebuddyImageSession.sessionId.slice(0, 8)));
+    assert(codebuddySpawnLine && codebuddySpawnLine.includes('--output-format stream-json'), 'CodeBuddy message should request stream-json output');
+    assert(codebuddySpawnLine.includes('--input-format stream-json'), 'CodeBuddy image message should switch stdin to stream-json');
+    assert(codebuddySpawnLine.includes('--permission-mode bypassPermissions'), 'CodeBuddy yolo mode should map to bypassPermissions');
+
+    ws.send(JSON.stringify({ type: 'set_mode', sessionId: codebuddyImageSession.sessionId, mode: 'plan' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'mode_changed' && msg.mode === 'plan');
+    const storedCodebuddyAfterMode = JSON.parse(fs.readFileSync(path.join(sessionsDir, `${codebuddyImageSession.sessionId}.json`), 'utf8'));
+    assert(storedCodebuddyAfterMode.codebuddySessionId === codebuddySessionIdBeforeMode, 'CodeBuddy session id should survive mode switch');
+    assert(storedCodebuddyAfterMode.model === 'glm-5.1', 'CodeBuddy runtime model should be persisted after first run');
+
+    ws.send(JSON.stringify({ type: 'message', text: 'second codebuddy prompt', sessionId: codebuddyImageSession.sessionId, mode: 'plan', agent: 'codebuddy' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codebuddyImageSession.sessionId);
+    const codebuddySpawns = fs.readFileSync(path.join(logsDir, 'process.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes(`"event":"process_spawn"`) && line.includes(codebuddyImageSession.sessionId.slice(0, 8)));
+    const lastCodebuddySpawn = codebuddySpawns[codebuddySpawns.length - 1] || '';
+    assert(lastCodebuddySpawn.includes(`--resume ${codebuddySessionIdBeforeMode}`), 'CodeBuddy mode switch should keep --resume session id');
+    assert(lastCodebuddySpawn.includes('--permission-mode plan'), 'CodeBuddy plan mode should pass --permission-mode plan');
+    assert(lastCodebuddySpawn.includes('--model glm-5.1'), 'CodeBuddy resumed run should reuse the persisted runtime model');
 
     ws.send(JSON.stringify({ type: 'list_agent_models', agent: 'kimi', requestId: 'kimi-models' }));
     const kimiModels = await nextMessage(messages, ws, (msg) => msg.type === 'agent_models_result' && msg.agent === 'kimi');

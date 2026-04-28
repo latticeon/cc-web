@@ -1,6 +1,6 @@
 # CC-Web
 
-A lightweight browser interface for Claude Code, Codex, and Kimi, designed to keep each agent close to its native CLI workflow while sharing the same web shell.
+A lightweight browser interface for Claude Code, Codex, CodeBuddy, and Kimi, designed to keep each agent close to its native CLI workflow while sharing the same web shell.
 
 ![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
@@ -16,8 +16,8 @@ A lightweight browser interface for Claude Code, Codex, and Kimi, designed to ke
 ## Features
 
 - **Lightweight runtime**: low backend overhead, browser-based control panel.
-- **Dual-agent sessions**: create Claude or Codex sessions on the same backend core.
-- **Agent-isolated views**: switching Claude / Codex only shows that agent's sessions, recent state, settings, and import entry points.
+- **Multi-agent sessions**: create Claude, Codex, CodeBuddy, or Kimi sessions on the same backend core.
+- **Agent-isolated views**: switching agents only shows that agent's sessions, recent state, settings, and import entry points.
 - **Agent-specific settings**: Claude keeps template-based model config; Codex has its own path, default model, mode, and search settings.
 - **Multi-session management**: create, switch, rename, and delete sessions; deleting a session also removes the local Claude history record.
 - **Local history import**: import Claude history from `~/.claude/projects/` and Codex rollout history from `~/.codex/sessions/`.
@@ -32,11 +32,12 @@ A lightweight browser interface for Claude Code, Codex, and Kimi, designed to ke
 ## Requirements
 
 - **Node.js** >= 18
-- **Claude Code CLI**, **Codex CLI**, and/or **Kimi CLI** installed and configured
+- **Claude Code CLI**, **Codex CLI**, **CodeBuddy CLI**, and/or **Kimi CLI** installed and configured
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 npm install -g @openai/codex
+npm install -g @tencent-ai/codebuddy-code
 npm install -g @moonshotai/kimi-code
 ```
 
@@ -75,6 +76,7 @@ After startup, open `http://localhost:8002` and sign in with your password.
 | `PORT` | No | `8002` | Service port |
 | `CLAUDE_PATH` | No | `claude` | Executable path to Claude CLI |
 | `CODEX_PATH` | No | `codex` | Executable path to Codex CLI |
+| `CODEBUDDY_PATH` | No | `codebuddy` | Executable path to CodeBuddy CLI |
 | `KIMI_PATH` | No | `kimi` | Executable path to Kimi CLI |
 | `CC_WEB_TRUST_PROXY` | No | `false` | Trust `X-Real-IP` / `X-Forwarded-For` from a reverse proxy; enable when the proxy is not on the same host |
 | `PUSHPLUS_TOKEN` | No | - | PushPlus token (migrated into notification config on first start) |

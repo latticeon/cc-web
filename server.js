@@ -38,6 +38,12 @@ function isConfiguredCliPathUsable(rawValue) {
     return false;
   }
 }
+function quoteWindowsCmdArg(value) {
+  const text = String(value ?? '');
+  if (!text) return '""';
+  if (!/[\s"&()^<>|]/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
 function resolveDefaultCodexPath() {
   if (isConfiguredCliPathUsable(process.env.CODEX_PATH)) return process.env.CODEX_PATH;
   if (process.platform !== 'win32') return 'codex';
@@ -63,6 +69,22 @@ function resolveDefaultCodexPath() {
   return 'codex';
 }
 const CODEX_PATH = resolveDefaultCodexPath();
+function resolveDefaultCodebuddyPath() {
+  if (isConfiguredCliPathUsable(process.env.CODEBUDDY_PATH)) return process.env.CODEBUDDY_PATH;
+  if (process.platform !== 'win32') return 'codebuddy';
+  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
+  const candidates = [
+    path.join(appData, 'npm', 'codebuddy.cmd'),
+    path.join(appData, 'npm', 'cbc.cmd'),
+    path.join(appData, 'npm', 'codebuddy.ps1'),
+    path.join(appData, 'npm', 'cbc.ps1'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'codebuddy';
+}
+const CODEBUDDY_PATH = resolveDefaultCodebuddyPath();
 function resolveDefaultKimiPath() {
   if (isConfiguredCliPathUsable(process.env.KIMI_PATH)) return process.env.KIMI_PATH;
   if (process.platform !== 'win32') return 'kimi';
@@ -133,12 +155,22 @@ function getCliInstallStatus() {
   const status = {
     claude: getCliInstallInfo(CLAUDE_PATH),
     codex: getCliInstallInfo(CODEX_PATH),
+    codebuddy: getCliInstallInfo(CODEBUDDY_PATH),
     kimi: getCliInstallInfo(KIMI_PATH),
     opencode: getCliInstallInfo(OPENCODE_PATH),
   };
   if (!status.codex.installed && process.platform === 'win32' && CODEX_PATH !== 'codex') {
     const fallback = getCliInstallInfo('codex');
     if (fallback.installed) status.codex = fallback;
+  }
+  if (!status.codebuddy.installed) {
+    for (const candidate of ['codebuddy', 'cbc']) {
+      const fallback = getCliInstallInfo(candidate);
+      if (fallback.installed) {
+        status.codebuddy = fallback;
+        break;
+      }
+    }
   }
   return status;
 }
@@ -722,12 +754,12 @@ function getAgentLabel(agent) {
 
 function isUsageMeteredAgent(agent) {
   const normalized = normalizeAgent(agent);
-  return normalized === 'codex' || normalized === 'opencode';
+  return normalized === 'codex' || normalized === 'codebuddy' || normalized === 'opencode';
 }
 
 function usesAgentsMarkdown(agent) {
   const normalized = normalizeAgent(agent);
-  return normalized === 'codex' || normalized === 'kimi' || normalized === 'opencode';
+  return normalized === 'codex' || normalized === 'codebuddy' || normalized === 'kimi' || normalized === 'opencode';
 }
 
 function resolveAgentDefaultSessionModel(agent) {
@@ -1741,7 +1773,7 @@ function splitHistoryMessages(messages) {
 }
 
 const IS_WIN = process.platform === 'win32';
-const RUNTIME_IDENTITY_AGENTS = new Set(['claude', 'codex', 'kimi', 'opencode']);
+const RUNTIME_IDENTITY_AGENTS = new Set(['claude', 'codex', 'codebuddy', 'kimi', 'opencode']);
 
 function normalizeProcessStartMarker(value) {
   const marker = String(value || '').trim();
@@ -2062,6 +2094,31 @@ function formatRuntimeError(agent, raw, context = {}) {
     return `Codex 任务失败${exitInfo}：${condensed}`;
   }
 
+  if (normalizedAgent === 'codebuddy') {
+    if (/ENOENT|not found|No such file/i.test(condensed)) {
+      return '找不到 CodeBuddy CLI。请检查当前环境是否能直接运行 `codebuddy` / `cbc`，或在 `.env` 中配置 `CODEBUDDY_PATH`。';
+    }
+    if (/unknown option|unknown flag|Usage:\s*(codebuddy|cbc)|unexpected argument/i.test(raw || '')) {
+      return `CodeBuddy CLI 参数不兼容：${firstMeaningfulLine(condensed)}。建议检查当前 CLI 版本与 cc-web 的参数约定是否匹配。`;
+    }
+    if (/permission denied|EACCES|EPERM/i.test(condensed)) {
+      return 'CodeBuddy CLI 启动失败：当前环境没有足够权限执行该命令或访问目标目录。';
+    }
+    if (/authentication|unauthorized|forbidden|login|api key|credential|token/i.test(condensed)) {
+      return 'CodeBuddy 鉴权失败。请确认本机 CodeBuddy CLI 已完成登录，且当前凭据仍然有效。';
+    }
+    if (/rate limit|quota|billing|credits/i.test(condensed)) {
+      return 'CodeBuddy 请求被额度或速率限制拦截。请检查账号配额、计费状态或稍后重试。';
+    }
+    if (/network|timed out|timeout|ECONNRESET|ENOTFOUND|TLS|certificate|fetch failed/i.test(condensed)) {
+      return 'CodeBuddy 运行时网络请求失败。请检查当前网络、代理或证书环境后重试。';
+    }
+    if (/permission mode|bypasspermissions|acceptedits|approval|sandbox/i.test(condensed)) {
+      return `CodeBuddy 当前的权限配置阻止了这次执行：${firstMeaningfulLine(condensed)}`;
+    }
+    return `CodeBuddy 任务失败${exitInfo}：${condensed}`;
+  }
+
   if (normalizedAgent === 'opencode') {
     if (/ENOENT|not found|No such file/i.test(condensed)) {
       return '找不到 OpenCode CLI。请检查 OpenCode 设置里的 CLI 路径，或确认系统 PATH 中可直接运行 `opencode`。';
@@ -2181,6 +2238,7 @@ function repairImportedSessionUpdatedAt() {
 
 function compactStartMessage(agent) {
   if (agent === 'codex') return '正在执行 Codex /compact 压缩上下文，请稍候…';
+  if (agent === 'codebuddy') return '正在执行 CodeBuddy /compact 压缩上下文，请稍候…';
   if (agent === 'kimi') return '正在执行 Kimi /compact 压缩上下文，请稍候…';
   if (agent === 'opencode') return '正在执行 OpenCode /compact 压缩上下文，请稍候…';
   return '正在执行 Claude 原生 /compact 压缩上下文，请稍候…';
@@ -2188,6 +2246,7 @@ function compactStartMessage(agent) {
 
 function compactDoneMessage(agent) {
   if (agent === 'codex') return '上下文压缩完成。已执行 Codex /compact，下次继续在同一会话发送即可。';
+  if (agent === 'codebuddy') return '上下文压缩完成。已执行 CodeBuddy /compact，下次继续在同一会话发送即可。';
   if (agent === 'kimi') return '上下文压缩完成。已执行 Kimi /compact，下次继续在同一会话发送即可。';
   if (agent === 'opencode') return '上下文压缩完成。已执行 OpenCode /compact，下次继续在同一会话发送即可。';
   return '上下文压缩完成。已按 Claude Code 原生策略执行 /compact，下次继续在同一会话发送即可。';
@@ -2219,6 +2278,7 @@ function buildAgentInitPrompt(agent, cwd) {
 
 function compactAutoStartMessage(agent) {
   if (agent === 'codex') return '检测到上下文达到上限，正在按 Codex /compact 自动压缩，然后继续当前任务…';
+  if (agent === 'codebuddy') return '检测到上下文达到上限，正在按 CodeBuddy /compact 自动压缩，然后继续当前任务…';
   if (agent === 'kimi') return '检测到上下文达到上限，正在按 Kimi /compact 自动压缩，然后继续当前任务…';
   if (agent === 'opencode') return '检测到上下文达到上限，正在按 OpenCode /compact 自动压缩，然后继续当前任务…';
   return '检测到上下文达到上限，正在按 Claude Code 原版策略自动执行 /compact，然后继续当前任务…';
@@ -2226,6 +2286,7 @@ function compactAutoStartMessage(agent) {
 
 function compactAutoResumeMessage(agent) {
   if (agent === 'codex') return '检测到上一条请求因上下文过大失败，现已按 Codex 压缩计划继续执行。';
+  if (agent === 'codebuddy') return '检测到上一条请求因上下文过大失败，现已按 CodeBuddy 压缩计划继续执行。';
   if (agent === 'kimi') return '检测到上一条请求因上下文过大失败，现已按 Kimi 压缩计划继续执行。';
   if (agent === 'opencode') return '检测到上一条请求因上下文过大失败，现已按 OpenCode 压缩计划继续执行。';
   return '检测到上一条请求因上下文过大失败，现已自动按压缩计划继续执行。';
@@ -3346,6 +3407,31 @@ function handleListAgentModels(ws, msg) {
   const agent = normalizeAgent(msg?.agent);
   const requestId = String(msg?.requestId || '').trim() || null;
 
+  if (agent === 'codebuddy') {
+    listCodebuddyModels()
+      .then((result) => {
+        wsSend(ws, {
+          type: 'agent_models_result',
+          agent,
+          requestId,
+          success: !!result?.success,
+          models: result?.models || [],
+          message: result?.message || '',
+        });
+      })
+      .catch((error) => {
+        wsSend(ws, {
+          type: 'agent_models_result',
+          agent,
+          requestId,
+          success: false,
+          models: [],
+          message: formatRuntimeError('codebuddy', String(error?.message || error || '无法读取模型列表')),
+        });
+      });
+    return;
+  }
+
   if (agent === 'kimi') {
     const result = listKimiModels();
     return wsSend(ws, {
@@ -3423,8 +3509,14 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
 
     case '/model': {
       const modelInput = parts[1];
-      if (agent === 'codex' || agent === 'kimi' || agent === 'opencode') {
-        const agentLabel = agent === 'codex' ? 'Codex' : agent === 'kimi' ? 'Kimi' : 'OpenCode';
+      if (agent === 'codex' || agent === 'codebuddy' || agent === 'kimi' || agent === 'opencode') {
+        const agentLabel = agent === 'codex'
+          ? 'Codex'
+          : agent === 'codebuddy'
+            ? 'CodeBuddy'
+            : agent === 'kimi'
+              ? 'Kimi'
+              : 'OpenCode';
         if (!modelInput) {
           const current = session?.model || '配置默认模型';
           wsSend(ws, { type: 'system_message', message: `当前 ${agentLabel} 模型: ${current}\n用法: /model <模型名>` });
@@ -3489,6 +3581,8 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         type: 'system_message',
         message: agent === 'codex'
           ? '当前会话尚未建立 Codex 上下文，暂时无需压缩。'
+          : agent === 'codebuddy'
+            ? '当前会话尚未建立 CodeBuddy 上下文，暂时无需压缩。'
           : agent === 'kimi'
             ? '当前会话尚未建立 Kimi 上下文，暂时无需压缩。'
           : agent === 'opencode'
@@ -3620,6 +3714,8 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         type: 'system_message',
         message: agent === 'codex'
           ? base + '\n/model [名称] — 查看/切换 Codex 模型（自由输入）\n/compact — 执行 Codex /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
+          : agent === 'codebuddy'
+            ? base + '\n/model [名称] — 查看/切换 CodeBuddy 模型（自由输入）\n/compact — 执行 CodeBuddy /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
           : agent === 'kimi'
             ? base + '\n/model [名称] — 查看/切换 Kimi 模型（自由输入）\n/compact — 执行 Kimi /compact 压缩上下文\n/init — 分析项目并生成/更新 AGENTS.md'
           : agent === 'opencode'
@@ -3971,6 +4067,11 @@ function handleDeleteSession(ws, sessionId) {
       plog('INFO', 'kimi_session_deleted', {
         sessionId: sessionId.slice(0, 8),
         kimiSessionId: session?.kimiSessionId || null,
+      });
+    } else if (sessionAgent === 'codebuddy') {
+      plog('INFO', 'codebuddy_session_deleted', {
+        sessionId: sessionId.slice(0, 8),
+        codebuddySessionId: session?.codebuddySessionId || null,
       });
     } else {
       deleteClaudeLocalSession(session?.claudeSessionId || null);
@@ -4410,6 +4511,7 @@ const {
   processEnv: process.env,
   CLAUDE_PATH,
   CODEX_PATH,
+  CODEBUDDY_PATH,
   KIMI_PATH,
   OPENCODE_PATH,
   MODEL_MAP,
@@ -4690,6 +4792,45 @@ function getOpencodeSessionList() {
   const cliItems = getOpencodeSessionListFromCli();
   if (cliItems.length > 0) return cliItems;
   return getOpencodeSessionListFromDb();
+}
+
+function getCodebuddyCliSpec(args = []) {
+  if (process.platform === 'win32' && /\.ps1$/i.test(CODEBUDDY_PATH)) {
+    return {
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CODEBUDDY_PATH, ...args],
+    };
+  }
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(CODEBUDDY_PATH)) {
+    const commandLine = [quoteWindowsCmdArg(CODEBUDDY_PATH), ...args.map(quoteWindowsCmdArg)].join(' ');
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', commandLine],
+    };
+  }
+  return { command: CODEBUDDY_PATH, args };
+}
+
+function getCodebuddyModelListCliSpec(args = []) {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(CODEBUDDY_PATH)) {
+    const ps1Path = CODEBUDDY_PATH.replace(/\.(cmd|bat)$/i, '.ps1');
+    if (fs.existsSync(ps1Path)) {
+      return {
+        command: 'powershell.exe',
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1Path, ...args],
+      };
+    }
+
+    const cliDir = path.dirname(CODEBUDDY_PATH);
+    const binPath = path.join(cliDir, 'node_modules', '@tencent-ai', 'codebuddy-code', 'bin', 'codebuddy');
+    if (fs.existsSync(binPath)) {
+      return {
+        command: process.execPath,
+        args: [binPath, ...args],
+      };
+    }
+  }
+  return getCodebuddyCliSpec(args);
 }
 
 function getOpencodeCliSpec(args = []) {
@@ -5017,6 +5158,357 @@ function listKimiModels() {
       message: formatRuntimeError('kimi', String(error?.message || error || '无法读取模型列表')),
     };
   }
+}
+
+const CODEBUDDY_MODEL_LIST_TIMEOUT_MS = 45000;
+const CODEBUDDY_MODEL_LIST_CACHE_TTL_MS = 5 * 60 * 1000;
+const codebuddyModelListCache = {
+  expiresAt: 0,
+  pending: null,
+  result: null,
+};
+
+function parseCodebuddyModelList(rawText) {
+  const models = [];
+  const seen = new Set();
+
+  function pushModel(entry) {
+    const id = String(entry?.id || '').replace(/`/g, '').trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const label = String(entry?.label || '').trim() || id;
+    models.push({
+      id,
+      label,
+      current: !!entry?.current,
+      credits: String(entry?.credits || '').trim(),
+    });
+  }
+
+  String(rawText || '').split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) return;
+
+    const columns = trimmed
+      .split('|')
+      .slice(1, -1)
+      .map((part) => part.trim());
+
+    if (columns.length < 2) return;
+    if (columns.every((column) => !column || /^[-:]+$/.test(column.replace(/\s+/g, '')))) return;
+
+    const first = columns[0] || '';
+    const second = columns[1] || '';
+    if ((/模型|model/i.test(first) && /^id$/i.test(second)) || /^模型名称$/i.test(first)) return;
+
+    const label = first
+      .replace(/←/g, ' ')
+      .replace(/[（(]\s*当前\s*[)）]/g, ' ')
+      .replace(/当前/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const id = second.replace(/`/g, '').trim();
+    if (!id || /^id$/i.test(id)) return;
+
+    pushModel({
+      id,
+      label: label || id,
+      current: /当前/.test(columns.join(' ')),
+    });
+  });
+
+  if (models.length > 0) return models;
+
+  String(rawText || '').split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const inlineTokens = trimmed.match(/`([^`]+)`/g);
+    if (!inlineTokens) return;
+    inlineTokens.forEach((token) => {
+      const id = token.slice(1, -1).trim();
+      if (!id) return;
+      pushModel({ id, label: id, current: false });
+    });
+  });
+
+  return models;
+}
+
+function getCodebuddyPackageRoots() {
+  const roots = [];
+  const seen = new Set();
+
+  function pushRoot(candidate) {
+    const value = String(candidate || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    try {
+      if (fs.existsSync(value) && fs.statSync(value).isDirectory()) roots.push(value);
+    } catch {}
+  }
+
+  if (/[\\/]/.test(CODEBUDDY_PATH)) {
+    const cliDir = path.dirname(CODEBUDDY_PATH);
+    pushRoot(path.join(cliDir, 'node_modules', '@tencent-ai', 'codebuddy-code'));
+    pushRoot(path.resolve(cliDir, '..', 'lib', 'node_modules', '@tencent-ai', 'codebuddy-code'));
+  }
+
+  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
+  if (appData) {
+    pushRoot(path.join(appData, 'npm', 'node_modules', '@tencent-ai', 'codebuddy-code'));
+  }
+
+  return roots;
+}
+
+function loadCodebuddyProductCatalogs() {
+  const catalogs = [];
+  for (const root of getCodebuddyPackageRoots()) {
+    let names = [];
+    try {
+      names = fs.readdirSync(root).filter((name) => /^product(?:\.[^.]+)?\.json$/i.test(name));
+    } catch {
+      continue;
+    }
+
+    for (const name of names) {
+      const filePath = path.join(root, name);
+      try {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const items = Array.isArray(parsed?.models) ? parsed.models : [];
+        const byId = new Map();
+        items.forEach((item) => {
+          const id = String(item?.id || '').trim();
+          if (!id || byId.has(id)) return;
+          byId.set(id, {
+            id,
+            label: String(item?.name || '').trim() || id,
+            credits: String(item?.credits || '').trim(),
+          });
+        });
+        if (byId.size > 0) {
+          catalogs.push({ name, filePath, byId });
+        }
+      } catch {}
+    }
+  }
+  return catalogs;
+}
+
+function pickCodebuddyProductCatalog(modelEntries) {
+  const catalogs = loadCodebuddyProductCatalogs();
+  if (catalogs.length === 0) return null;
+
+  const modelIds = Array.from(new Set(
+    (Array.isArray(modelEntries) ? modelEntries : [])
+      .map((entry) => String(entry?.id || '').trim())
+      .filter(Boolean)
+  ));
+  if (modelIds.length === 0) return null;
+
+  let bestCatalog = null;
+  let bestScore = null;
+  for (const catalog of catalogs) {
+    let matched = 0;
+    let creditsMatched = 0;
+    for (const id of modelIds) {
+      const meta = catalog.byId.get(id);
+      if (!meta) continue;
+      matched += 1;
+      if (meta.credits) creditsMatched += 1;
+    }
+    if (matched === 0) continue;
+    const preference = /product\.internal\.json$/i.test(catalog.name)
+      ? 3
+      : /^product\.json$/i.test(catalog.name)
+        ? 2
+        : /product\.cloudhosted\.json$/i.test(catalog.name)
+          ? 1
+          : 0;
+    const score = [matched, creditsMatched, preference];
+    if (!bestScore || score[0] > bestScore[0]
+      || (score[0] === bestScore[0] && score[1] > bestScore[1])
+      || (score[0] === bestScore[0] && score[1] === bestScore[1] && score[2] > bestScore[2])) {
+      bestCatalog = catalog;
+      bestScore = score;
+    }
+  }
+
+  return bestCatalog;
+}
+
+function enrichCodebuddyModelEntries(modelEntries) {
+  const catalog = pickCodebuddyProductCatalog(modelEntries);
+  if (!catalog) return modelEntries;
+
+  return modelEntries.map((entry) => {
+    const meta = catalog.byId.get(entry.id);
+    if (!meta) return entry;
+    return {
+      ...entry,
+      label: entry.label || meta.label || entry.id,
+      credits: entry.credits || meta.credits || '',
+    };
+  });
+}
+
+function runCodebuddyCommandCapture(args = [], timeoutMs = CODEBUDDY_MODEL_LIST_TIMEOUT_MS) {
+  const cliSpec = getCodebuddyModelListCliSpec(args);
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let timer = null;
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(payload);
+    };
+
+    let child = null;
+    try {
+      child = spawn(cliSpec.command, cliSpec.args, {
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({
+        error,
+        stdout,
+        stderr,
+        status: null,
+        signal: null,
+        timedOut,
+      });
+      return;
+    }
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      if (child?.pid) killProcess(child.pid, true);
+      const error = new Error(`Command timed out after ${timeoutMs}ms`);
+      error.code = 'ETIMEDOUT';
+      finish({
+        error,
+        stdout,
+        stderr,
+        status: null,
+        signal: 'SIGKILL',
+        timedOut,
+      });
+    }, timeoutMs);
+
+    if (child.stdout) {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+    }
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+    }
+
+    child.on('error', (error) => {
+      finish({
+        error,
+        stdout,
+        stderr,
+        status: null,
+        signal: null,
+        timedOut,
+      });
+    });
+
+    child.on('close', (status, signal) => {
+      finish({
+        error: null,
+        stdout,
+        stderr,
+        status,
+        signal,
+        timedOut,
+      });
+    });
+  });
+}
+
+async function fetchCodebuddyModels() {
+  try {
+    const result = await runCodebuddyCommandCapture(['-p', '/model list']);
+    if (!result.error && result.status === 0) {
+      const models = enrichCodebuddyModelEntries(parseCodebuddyModelList(result.stdout));
+      if (models.length > 0) {
+        return { success: true, models, message: '' };
+      }
+      return {
+        success: false,
+        models: [],
+        message: 'CodeBuddy 返回了模型列表，但当前输出格式未被识别。',
+      };
+    }
+
+    if (result.timedOut) {
+      return {
+        success: false,
+        models: [],
+        message: `读取 CodeBuddy 模型列表超时（>${Math.round(CODEBUDDY_MODEL_LIST_TIMEOUT_MS / 1000)}s）。请稍后重试。`,
+      };
+    }
+
+    if (result.error) {
+      return {
+        success: false,
+        models: [],
+        message: formatRuntimeError('codebuddy', String(result.error.message || result.error)),
+      };
+    }
+
+    const raw = [result.stderr, result.stdout].filter(Boolean).join('\n').trim() || '无法读取模型列表';
+    return {
+      success: false,
+      models: [],
+      message: formatRuntimeError('codebuddy', raw, { exitCode: result.status }),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      models: [],
+      message: formatRuntimeError('codebuddy', String(error?.message || error || '无法读取模型列表')),
+    };
+  }
+}
+
+function listCodebuddyModels() {
+  const now = Date.now();
+  if (codebuddyModelListCache.result && codebuddyModelListCache.expiresAt > now) {
+    return Promise.resolve(codebuddyModelListCache.result);
+  }
+  if (codebuddyModelListCache.pending) {
+    return codebuddyModelListCache.pending;
+  }
+
+  const pending = fetchCodebuddyModels()
+    .then((result) => {
+      if (result?.success) {
+        codebuddyModelListCache.result = result;
+        codebuddyModelListCache.expiresAt = Date.now() + CODEBUDDY_MODEL_LIST_CACHE_TTL_MS;
+      } else {
+        codebuddyModelListCache.result = null;
+        codebuddyModelListCache.expiresAt = 0;
+      }
+      return result;
+    })
+    .finally(() => {
+      if (codebuddyModelListCache.pending === pending) {
+        codebuddyModelListCache.pending = null;
+      }
+    });
+
+  codebuddyModelListCache.pending = pending;
+  return pending;
 }
 
 function listOpencodeModels() {

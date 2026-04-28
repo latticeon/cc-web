@@ -95,6 +95,22 @@
       },
     },
     {
+      id: 'codebuddy',
+      label: 'CodeBuddy',
+      avatar: '',
+      default: false,
+      defaults: { initialModel: '' },
+      modelControl: {
+        kind: 'dynamic',
+        title: '选择 CodeBuddy 模型',
+        loadingText: '正在加载 CodeBuddy 模型…',
+        emptyText: '未获取到 CodeBuddy 可用模型',
+        emptyLabel: '选择模型',
+        sourceLabel: 'CodeBuddy CLI',
+      },
+      import: null,
+    },
+    {
       id: 'kimi',
       label: 'Kimi',
       avatar: '',
@@ -1283,34 +1299,71 @@
     return normalized || '默认思考';
   }
 
-  function buildDynamicModelOptions(agent, modelControl, remoteModels) {
-    const items = [];
-    const seen = new Set();
-    const normalizedAgent = normalizeAgent(agent);
-
-    function addOption(value, desc) {
-      const normalizedValue = String(value || '').trim();
-      if (!normalizedValue || seen.has(normalizedValue)) return;
-      seen.add(normalizedValue);
-      items.push({
-        value: normalizedValue,
-        label: normalizedValue,
-        desc: desc || (modelControl?.sourceLabel || '可用模型'),
-      });
+  function normalizeDynamicModelOption(model, modelControl, fallbackDesc) {
+    const sourceLabel = modelControl?.sourceLabel || '可用模型';
+    if (model && typeof model === 'object' && !Array.isArray(model)) {
+      const value = String(model.id || model.model || model.value || '').trim();
+      if (!value) return null;
+      const label = String(model.label || model.name || value).trim() || value;
+      const credits = String(model.credits || '').trim();
+      const parts = [];
+      if (label !== value) parts.push(value);
+      if (credits) parts.push(credits);
+      return {
+        value,
+        label,
+        desc: parts.join(' · ') || fallbackDesc || sourceLabel,
+      };
     }
 
-    addOption(currentModel, '当前会话模型');
+    const value = String(model || '').trim();
+    if (!value) return null;
+    return {
+      value,
+      label: value,
+      desc: fallbackDesc || sourceLabel,
+    };
+  }
+
+  function buildDynamicModelOptions(agent, modelControl, remoteModels) {
+    const items = [];
+    const itemMap = new Map();
+    const normalizedAgent = normalizeAgent(agent);
+
+    function upsertOption(model, fallbackDesc, preferMeta = false) {
+      const next = normalizeDynamicModelOption(model, modelControl, fallbackDesc);
+      if (!next) return;
+
+      const existing = itemMap.get(next.value);
+      if (existing) {
+        if (preferMeta) {
+          if (next.label) existing.label = next.label;
+          if (next.desc) existing.desc = next.desc;
+        }
+        return;
+      }
+
+      const entry = {
+        value: next.value,
+        label: next.label,
+        desc: next.desc,
+      };
+      items.push(entry);
+      itemMap.set(entry.value, entry);
+    }
+
+    upsertOption(currentModel, '当前会话模型');
 
     sessions
       .filter((session) => normalizeAgent(session.agent) === normalizedAgent)
       .slice()
       .sort((a, b) => new Date(b.updated || 0).getTime() - new Date(a.updated || 0).getTime())
       .forEach((session) => {
-        addOption(session.model, session.id === currentSessionId ? '当前会话已保存模型' : '最近会话');
+        upsertOption(session.model, session.id === currentSessionId ? '当前会话已保存模型' : '最近会话');
       });
 
     (remoteModels || []).forEach((model) => {
-      addOption(model, modelControl?.sourceLabel || '可用模型');
+      upsertOption(model, modelControl?.sourceLabel || '可用模型', true);
     });
 
     return items;
@@ -1330,7 +1383,7 @@
           models: [],
           message: '加载模型列表超时，请重试',
         });
-      }, 15000);
+      }, 50000);
 
       pendingAgentModelRequests.set(requestId, (payload) => {
         clearTimeout(timer);
@@ -4267,6 +4320,11 @@
 
       <div class="settings-divider"></div>
 
+      <div class="settings-section-title">CodeBuddy CLI 配置</div>
+      <div id="codebuddy-config-area"></div>
+
+      <div class="settings-divider"></div>
+
       <div class="settings-section-title">Kimi CLI 配置</div>
       <div id="kimi-config-area"></div>
       <div class="settings-actions">
@@ -4318,6 +4376,7 @@
         { key: 'kimi', label: 'Kimi' },
         { key: 'claude', label: 'Claude' },
         { key: 'codex', label: 'Codex' },
+        { key: 'codebuddy', label: 'CodeBuddy' },
         { key: 'opencode', label: 'OpenCode' },
       ];
       cliInstallStatusArea.innerHTML = `
@@ -4345,6 +4404,24 @@
     };
 
     renderCliInstallStatus();
+
+    // === CodeBuddy Config UI ===
+    const codebuddyConfigArea = panel.querySelector('#codebuddy-config-area');
+
+    function renderCodebuddyConfigArea() {
+      codebuddyConfigArea.innerHTML = `
+        <div class="settings-inline-note">
+          CC-Web 当前直接复用本机 <code>codebuddy</code> / <code>cbc</code> CLI 的登录态与默认配置，不额外保存 API Key 或 Profile。
+          模型切换请使用会话顶部模型选择器或 <code>/model</code>，上下文压缩可直接使用 <code>/compact</code>。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-test" id="codebuddy-info-btn" style="padding:4px 10px">说明</button>
+        </div>
+      `;
+      panel.querySelector('#codebuddy-info-btn').addEventListener('click', showCodebuddyLocalInfoModal);
+    }
+
+    renderCodebuddyConfigArea();
 
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
@@ -4641,6 +4718,37 @@
       modal.querySelector('#codex-info-close').addEventListener('click', closeModal);
       modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
       modal.querySelector('#codex-info-ok').addEventListener('click', closeModal);
+    }
+
+    function showCodebuddyLocalInfoModal() {
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '460px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>CodeBuddy CLI 配置说明</h3>
+          <button class="settings-close" id="codebuddy-info-close">&times;</button>
+        </div>
+        <div class="settings-inline-note">
+          当前接入方式会直接调用本机 <code>codebuddy</code>（或别名 <code>cbc</code>）CLI，并沿用你已经在 CLI 中完成的登录态和默认配置，不会改写本机文件。
+          <br><br>
+          如果需要切换模型，请在会话顶部模型选择器里选择，或在对话中执行 <code>/model</code>；继续同一上下文时，CC-Web 会自动复用当前会话对应的 CodeBuddy session。
+          <br><br>
+          当前设置页暂不提供 CodeBuddy 专属 Profile 编辑器；如需调整 CLI 级别配置，请直接在本机 CodeBuddy CLI 环境中完成。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="codebuddy-info-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#codebuddy-info-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#codebuddy-info-ok').addEventListener('click', closeModal);
     }
 
     function showKimiLocalInfoModal() {

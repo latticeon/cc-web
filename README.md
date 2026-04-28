@@ -1,6 +1,6 @@
 # CC-Web
 
-Claude Code / Codex / Kimi 轻量级 Web 远程工具 — 在浏览器中与本机 CLI Agent 交互。
+Claude Code / Codex / CodeBuddy / Kimi 轻量级 Web 远程工具 — 在浏览器中与本机 CLI Agent 交互。
 
 ![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
@@ -34,10 +34,11 @@ https://github.com/ZgDaniel/cc-web 给我装！
 ## 前提条件
 
 - **Node.js** >= 18
-- **Claude Code CLI**、**Codex CLI** 或 **Kimi CLI** 已安装并配置
+- **Claude Code CLI**、**Codex CLI**、**CodeBuddy CLI** 或 **Kimi CLI** 已安装并配置
   ```bash
   npm install -g @anthropic-ai/claude-code
   npm install -g @openai/codex
+  npm install -g @tencent-ai/codebuddy-code
   npm install -g @moonshotai/kimi-code
   ```
 
@@ -77,6 +78,7 @@ copy .env.example .env  & REM 可选
 | `PORT` | 否 | `8002` | 服务监听端口 |
 | `CLAUDE_PATH` | 否 | `claude` | Claude CLI 可执行文件路径 |
 | `CODEX_PATH` | 否 | `codex` | Codex CLI 可执行文件路径 |
+| `CODEBUDDY_PATH` | 否 | `codebuddy` | CodeBuddy CLI 可执行文件路径 |
 | `KIMI_PATH` | 否 | `kimi` | Kimi CLI 可执行文件路径 |
 | `CC_WEB_CONFIG_DIR` | 否 | `./config` | 配置目录覆写（主要供隔离测试使用） |
 | `CC_WEB_SESSIONS_DIR` | 否 | `./sessions` | 会话目录覆写（主要供隔离测试使用） |
