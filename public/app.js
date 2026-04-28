@@ -2050,6 +2050,10 @@
         if (typeof _onKimiConfig === 'function') _onKimiConfig(msg.config);
         break;
 
+      case 'cli_install_status':
+        if (typeof _onCliInstallStatus === 'function') _onCliInstallStatus(msg.status || {});
+        break;
+
       case 'claude_local_config':
         if (typeof _onClaudeLocalConfig === 'function') _onClaudeLocalConfig(msg);
         break;
@@ -3926,6 +3930,7 @@
   let _onModelConfig = null;
   let _onCodexConfig = null;
   let _onKimiConfig = null;
+  let _onCliInstallStatus = null;
   let _onFetchModelsResult = null;
   let _onAgentImportSessions = null;
   let _onClaudeLocalConfig = null;
@@ -4224,6 +4229,7 @@
     send({ type: 'get_codex_config' });
     send({ type: 'get_kimi_config' });
     send({ type: 'get_notify_config' });
+    send({ type: 'get_cli_install_status' });
 
     const overlay = document.createElement('div');
     overlay.className = 'settings-overlay';
@@ -4237,6 +4243,11 @@
         ⚙ 设置
         <button class="settings-close" title="关闭">&times;</button>
       </h3>
+
+      <div class="settings-section-title">CLI 安装状态</div>
+      <div id="cli-install-status-area"></div>
+
+      <div class="settings-divider"></div>
 
       <div class="settings-section-title">Claude API 配置</div>
       <div id="claude-config-area"></div>
@@ -4294,12 +4305,46 @@
 
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+    const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
     const themePageBtn = panel.querySelector('[data-open-theme-page]');
     if (themePageBtn) themePageBtn.addEventListener('click', openThemeSubpage);
     const notifyPageBtn2 = panel.querySelector('[data-open-notify-page]');
     if (notifyPageBtn2) notifyPageBtn2.addEventListener('click', openNotifySubpage);
     const devPageBtn = panel.querySelector('[data-open-dev-page]');
     if (devPageBtn) devPageBtn.addEventListener('click', openDevSettingsSubpage);
+
+    function renderCliInstallStatus(status = {}) {
+      const agents = [
+        { key: 'kimi', label: 'Kimi' },
+        { key: 'claude', label: 'Claude' },
+        { key: 'codex', label: 'Codex' },
+        { key: 'opencode', label: 'OpenCode' },
+      ];
+      cliInstallStatusArea.innerHTML = `
+        <div class="settings-cli-list">
+          ${agents.map((agent) => {
+            const item = status?.[agent.key] || {};
+            const installed = !!item.installed;
+            const version = item.version || '';
+            return `
+              <div class="settings-cli-card${installed ? ' is-installed' : ''}">
+                <div class="settings-cli-card-head">
+                  <span class="settings-cli-name">${escapeHtml(agent.label)}</span>
+                  <span class="settings-cli-badge ${installed ? 'success' : 'muted'}">${installed ? '已安装' : '未安装'}</span>
+                </div>
+                <div class="settings-cli-meta">${installed ? escapeHtml(version || '已安装') : '未检测到可用命令'}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    _onCliInstallStatus = (status) => {
+      renderCliInstallStatus(status || {});
+    };
+
+    renderCliInstallStatus();
 
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
@@ -5466,6 +5511,7 @@
     _onClaudeLocalConfig = null;
     _onCodexLocalConfig = null;
     _onKimiLocalConfig = null;
+    _onCliInstallStatus = null;
     _onDevConfig = null;
     window._ccOnUpdateInfo = null;
     document.removeEventListener('keydown', _settingsEscape);

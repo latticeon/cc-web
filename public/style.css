@@ -2337,6 +2337,54 @@ body.session-loading-active {
   line-height: 1;
   flex-shrink: 0;
 }
+.settings-cli-list {
+  display: grid;
+  gap: 10px;
+}
+.settings-cli-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 249, 242, 0.92));
+}
+.settings-cli-card.is-installed {
+  border-color: rgba(93, 138, 84, 0.28);
+}
+.settings-cli-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.settings-cli-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.settings-cli-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.settings-cli-badge.success {
+  color: #2f6b33;
+  background: rgba(93, 138, 84, 0.16);
+}
+.settings-cli-badge.muted {
+  color: var(--text-secondary);
+  background: rgba(45, 31, 20, 0.08);
+}
+.settings-cli-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  word-break: break-all;
+}
 .settings-subpage-panel {
   max-width: 460px;
 }

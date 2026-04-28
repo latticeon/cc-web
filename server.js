@@ -81,6 +81,68 @@ function resolveDefaultOpencodePath() {
   return 'opencode';
 }
 const OPENCODE_PATH = resolveDefaultOpencodePath();
+
+function getCliInstallInfo(command, args = ['--version']) {
+  try {
+    const normalizedCommand = String(command || '').trim();
+    if (!normalizedCommand) {
+      return { installed: false, version: '', error: 'empty_command' };
+    }
+    const isWindows = process.platform === 'win32';
+    const isWindowsPsScript = isWindows && /\.ps1$/i.test(normalizedCommand);
+    const isWindowsCmdScript = isWindows && /\.(cmd|bat)$/i.test(normalizedCommand);
+    const isBareCommand = !/[\\/]/.test(normalizedCommand) && !/\.[a-z0-9]+$/i.test(normalizedCommand);
+    const spawnCommand = isWindowsPsScript
+      ? 'powershell.exe'
+      : isWindowsCmdScript || (isWindows && isBareCommand)
+        ? 'cmd.exe'
+        : normalizedCommand;
+    const spawnArgs = isWindowsPsScript
+      ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', normalizedCommand, ...args]
+      : isWindowsCmdScript
+        ? ['/d', '/s', '/c', `"${normalizedCommand}" ${args.join(' ')}`]
+        : (isWindows && isBareCommand)
+          ? ['/d', '/s', '/c', `${normalizedCommand} ${args.join(' ')}`]
+          : args;
+    const result = spawnSync(spawnCommand, spawnArgs, {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      shell: false,
+    });
+    if (result.error) {
+      return { installed: false, version: '', error: result.error.message || 'spawn_failed' };
+    }
+    if (result.status !== 0) {
+      const output = String(result.stdout || result.stderr || '').trim();
+      return { installed: false, version: '', error: output || `exit_${result.status}` };
+    }
+    const output = String(result.stdout || result.stderr || '').trim();
+    const firstLine = output.split(/\r?\n/).find(Boolean) || '';
+    return {
+      installed: true,
+      version: firstLine || output || '已安装',
+      error: '',
+    };
+  } catch (error) {
+    return { installed: false, version: '', error: error?.message || 'unknown_error' };
+  }
+}
+
+function getCliInstallStatus() {
+  const status = {
+    claude: getCliInstallInfo(CLAUDE_PATH),
+    codex: getCliInstallInfo(CODEX_PATH),
+    kimi: getCliInstallInfo(KIMI_PATH),
+    opencode: getCliInstallInfo(OPENCODE_PATH),
+  };
+  if (!status.codex.installed && process.platform === 'win32' && CODEX_PATH !== 'codex') {
+    const fallback = getCliInstallInfo('codex');
+    if (fallback.installed) status.codex = fallback;
+  }
+  return status;
+}
+
 const CONFIG_DIR = process.env.CC_WEB_CONFIG_DIR || path.join(__dirname, 'config');
 const SESSIONS_DIR = process.env.CC_WEB_SESSIONS_DIR || path.join(__dirname, 'sessions');
 const PUBLIC_DIR = process.env.CC_WEB_PUBLIC_DIR || path.join(__dirname, 'public');
@@ -2779,6 +2841,9 @@ wss.on('connection', (ws, req) => {
         break;
       case 'get_kimi_config':
         wsSend(ws, { type: 'kimi_config', config: getKimiConfigMasked() });
+        break;
+      case 'get_cli_install_status':
+        wsSend(ws, { type: 'cli_install_status', status: getCliInstallStatus() });
         break;
       case 'save_kimi_config':
         handleSaveKimiConfig(ws, msg.config);
