@@ -2060,6 +2060,168 @@ function condenseRuntimeError(raw) {
   return lines.slice(0, 3).join(' ');
 }
 
+function appendRuntimeErrorDetail(message, detail) {
+  const condensedDetail = condenseRuntimeError(detail);
+  if (!condensedDetail) return message;
+  if (message.includes(condensedDetail)) return message;
+  return `${message} 原始输出：${condensedDetail}`;
+}
+
+function isLowSignalRuntimeMessage(text) {
+  const condensed = condenseRuntimeError(text);
+  if (!condensed) return true;
+  return /^(to )?resume (this )?(session|conversation)\b|^to resume this session:|^to continue this (session|conversation):|^resume with\b/i.test(condensed);
+}
+
+function runtimeErrorScore(text) {
+  const condensed = condenseRuntimeError(text);
+  if (!condensed) return Number.NEGATIVE_INFINITY;
+
+  let score = Math.min(12, condensed.length / 24);
+  if (isLowSignalRuntimeMessage(condensed)) score -= 50;
+  if (/^Usage:|unknown option|unknown flag|unexpected argument/i.test(condensed)) score -= 12;
+  if (/HTTP\s*\d{3}|status code[: ]*\d{3}|page not found|bad request|unauthorized|forbidden|too many requests|internal server error|bad gateway|gateway timeout|service unavailable/i.test(condensed)) score += 40;
+  if (/error|failed|exception|traceback|timeout|timed out|network|not found|denied|refused|reset|quota|rate limit|invalid|unsupported/i.test(condensed)) score += 24;
+  if (/^\{.+\}$/.test(condensed)) score -= 4;
+  return score;
+}
+
+function pickMostUsefulRuntimeError(candidates = []) {
+  const seen = new Set();
+  let best = null;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const item = candidates[i];
+    const text = condenseRuntimeError(item?.text || '');
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const ranked = {
+      source: item?.source || null,
+      text,
+      score: runtimeErrorScore(text),
+      index: i,
+    };
+    if (!best
+      || ranked.score > best.score
+      || (ranked.score === best.score && ranked.index < best.index)) {
+      best = ranked;
+    }
+  }
+
+  return best || { source: null, text: '' };
+}
+
+function extractRuntimeOutputDiagnostics(rawText) {
+  const rawLines = [];
+  const eventErrors = [];
+
+  function pushEventError(value) {
+    const text = String(value || '').trim();
+    if (text) eventErrors.push(text);
+  }
+
+  for (const rawLine of String(rawText || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line);
+      if (!event || typeof event !== 'object') continue;
+      if (typeof event.error === 'string') pushEventError(event.error);
+      if (typeof event.error?.message === 'string') pushEventError(event.error.message);
+      if (typeof event.message === 'string' && String(event.type || '').trim().toLowerCase() === 'error') {
+        pushEventError(event.message);
+      }
+      if (typeof event.result === 'string' && /error|failed/i.test(String(event.subtype || ''))) {
+        pushEventError(event.result);
+      }
+    } catch {
+      rawLines.push(line);
+    }
+  }
+
+  return {
+    stdoutSnippet: rawLines.slice(-8).join('\n').slice(-1200),
+    eventErrorSnippet: eventErrors.slice(-4).join('\n').slice(-1200),
+  };
+}
+
+function collectRuntimeFailureDiagnostics(sessionId, entry) {
+  const errPath = path.join(runDir(sessionId), 'error.log');
+  const outputPath = path.join(runDir(sessionId), 'output.jsonl');
+
+  let stderrSnippet = '';
+  try {
+    if (fs.existsSync(errPath)) {
+      const content = fs.readFileSync(errPath, 'utf8').trim();
+      if (content) stderrSnippet = content.slice(-1200);
+    }
+  } catch {}
+
+  let stdoutSnippet = '';
+  let outputEventError = '';
+  try {
+    if (fs.existsSync(outputPath)) {
+      const content = fs.readFileSync(outputPath, 'utf8');
+      const diagnostics = extractRuntimeOutputDiagnostics(content);
+      stdoutSnippet = diagnostics.stdoutSnippet || '';
+      outputEventError = diagnostics.eventErrorSnippet || '';
+    }
+  } catch {}
+
+  const primary = pickMostUsefulRuntimeError([
+    { source: 'lastError', text: entry?.lastError || '' },
+    { source: 'output-event', text: outputEventError },
+    { source: 'stderr', text: stderrSnippet },
+    { source: 'stdout', text: stdoutSnippet },
+  ]);
+
+  return {
+    stderrSnippet,
+    stdoutSnippet,
+    outputEventError,
+    primaryRawError: primary.text || null,
+    primarySource: primary.source || null,
+  };
+}
+
+function classifyHttpLikeRuntimeError(text) {
+  const condensed = condenseRuntimeError(text);
+  if (!condensed) return null;
+  if (/(404 page not found|http\s*404|status code[: ]*404|\b404\b.*page not found)/i.test(condensed)) {
+    return '404';
+  }
+  if (/(http\s*400|status code[: ]*400|bad request)/i.test(condensed)) {
+    return '400';
+  }
+  if (/(http\s*401|status code[: ]*401|\b401\b.*unauthorized|\bunauthorized\b)/i.test(condensed)) {
+    return '401';
+  }
+  if (/(http\s*403|status code[: ]*403|\b403\b.*forbidden|\bforbidden\b)/i.test(condensed)) {
+    return '403';
+  }
+  if (/(http\s*404|status code[: ]*404)/i.test(condensed)) {
+    return '404';
+  }
+  if (/(http\s*408|status code[: ]*408|request timeout)/i.test(condensed)) {
+    return '408';
+  }
+  if (/(http\s*409|status code[: ]*409|\b409\b.*conflict)/i.test(condensed)) {
+    return '409';
+  }
+  if (/(http\s*422|status code[: ]*422|unprocessable entity)/i.test(condensed)) {
+    return '422';
+  }
+  if (/(http\s*429|status code[: ]*429|too many requests|rate limit)/i.test(condensed)) {
+    return '429';
+  }
+  if (/(http\s*5\d{2}|status code[: ]*5\d{2}|internal server error|bad gateway|gateway timeout|service unavailable)/i.test(condensed)) {
+    return '5xx';
+  }
+  return null;
+}
+
 function formatRuntimeError(agent, raw, context = {}) {
   const normalizedAgent = normalizeAgent(agent);
   const agentLabel = getAgentLabel(normalizedAgent);
@@ -2067,6 +2229,69 @@ function formatRuntimeError(agent, raw, context = {}) {
   const exitInfo = typeof context.exitCode === 'number' ? `（退出码 ${context.exitCode}）` : '';
   if (!condensed) {
     return `${agentLabel} 任务异常结束${exitInfo}，但 CLI 没有返回更多错误信息。`;
+  }
+
+  if (isLowSignalRuntimeMessage(condensed)) {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 任务异常结束${exitInfo}，但 CLI 只返回了会话恢复提示，没有给出真正的失败原因。`,
+      context.stdoutSnippet || context.stderrSnippet || condensed
+    );
+  }
+
+  const httpLike = classifyHttpLikeRuntimeError(condensed);
+  if (httpLike === '404') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求的 API 路径不存在（HTTP 404）。请检查当前 API Base、/v1 前缀或后端路由是否正确。`,
+      condensed
+    );
+  }
+  if (httpLike === '400') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求参数不被上游接口接受（HTTP 400）。请检查当前模型名、请求格式或自定义兼容层参数。`,
+      condensed
+    );
+  }
+  if (httpLike === '401') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 鉴权失败（HTTP 401）。请检查当前 API Key、登录态或鉴权头是否有效。`,
+      condensed
+    );
+  }
+  if (httpLike === '403') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求被服务端拒绝（HTTP 403）。请检查账号权限、模型访问许可或服务端白名单设置。`,
+      condensed
+    );
+  }
+  if (httpLike === '408') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求等待超时（HTTP 408）。请稍后重试，或检查当前网络和上游响应速度。`,
+      condensed
+    );
+  }
+  if (httpLike === '409') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求与当前服务端状态冲突（HTTP 409）。请检查会话状态或稍后重试。`,
+      condensed
+    );
+  }
+  if (httpLike === '422') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求已送达，但上游无法处理（HTTP 422）。请检查模型 ID、消息格式或工具参数是否合法。`,
+      condensed
+    );
+  }
+  if (httpLike === '429') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 请求被额度或速率限制拦截（HTTP 429）。请检查账号配额、限流策略或稍后重试。`,
+      condensed
+    );
+  }
+  if (httpLike === '5xx') {
+    return appendRuntimeErrorDetail(
+      `${agentLabel} 上游服务异常（HTTP 5xx）。请检查当前服务端状态，或稍后重试。`,
+      condensed
+    );
   }
 
   if (normalizedAgent === 'codex') {
@@ -2314,23 +2539,27 @@ function handleProcessComplete(sessionId, exitCode, signal) {
   const pendingRetry = pendingCompactRetries.get(sessionId) || null;
   let contextLimitExceeded = false;
 
-  // Read stderr for error clues
-  let stderrSnippet = '';
-  try {
-    const errPath = path.join(runDir(sessionId), 'error.log');
-    if (fs.existsSync(errPath)) {
-      const content = fs.readFileSync(errPath, 'utf8').trim();
-      if (content) stderrSnippet = content.slice(-500);
-    }
-  } catch {}
-
-  const rawCompletionError = entry.lastError || (
-    ((typeof exitCode === 'number' && exitCode !== 0) || (!!signal && signal !== 'SIGTERM'))
-      ? (stderrSnippet || null)
-      : null
+  const diagnostics = collectRuntimeFailureDiagnostics(sessionId, entry);
+  const rawCompletionError = entry.lastError
+    ? (diagnostics.primaryRawError || condenseRuntimeError(entry.lastError))
+    : (
+        ((typeof exitCode === 'number' && exitCode !== 0) || (!!signal && signal !== 'SIGTERM'))
+          ? (diagnostics.primaryRawError || null)
+          : null
+      );
+  contextLimitExceeded = isContextLimitError(
+    entry.agent || 'claude',
+    `${entry.fullText || ''}\n${diagnostics.stderrSnippet || ''}\n${diagnostics.stdoutSnippet || ''}\n${rawCompletionError || ''}`
   );
-  contextLimitExceeded = isContextLimitError(entry.agent || 'claude', `${entry.fullText || ''}\n${stderrSnippet || ''}\n${rawCompletionError || ''}`);
-  const completionError = rawCompletionError ? formatRuntimeError(entry.agent || 'claude', rawCompletionError, { exitCode, signal }) : null;
+  const completionError = rawCompletionError
+    ? formatRuntimeError(entry.agent || 'claude', rawCompletionError, {
+        exitCode,
+        signal,
+        stderrSnippet: diagnostics.stderrSnippet,
+        stdoutSnippet: diagnostics.stdoutSnippet,
+        errorSource: diagnostics.primarySource,
+      })
+    : null;
   if (!entry.lastError && rawCompletionError) entry.lastError = rawCompletionError;
 
   plog(exitCode === 0 || exitCode === null ? 'INFO' : 'WARN', 'process_complete', {
@@ -2347,7 +2576,10 @@ function handleProcessComplete(sessionId, exitCode, signal) {
     cost: entry.lastCost,
     usage: entry.lastUsage || null,
     error: rawCompletionError,
-    stderr: stderrSnippet || null,
+    errorSource: diagnostics.primarySource || null,
+    stderr: diagnostics.stderrSnippet || null,
+    stdout: diagnostics.stdoutSnippet || null,
+    parsedOutputError: diagnostics.outputEventError || null,
     requestTooLarge: contextLimitExceeded,
   });
 
