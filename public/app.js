@@ -66,6 +66,7 @@
         title: '选择 Codex 模型',
         secondaryTitle: '选择 Thinking 强度',
         baseOptions: [
+          { value: 'gpt-5.5', label: 'GPT-5.5', desc: '最新 Codex 模型' },
           { value: 'gpt-5.4', label: 'GPT-5.4', desc: '当前主力 Codex 模型' },
           { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: '偏工程执行场景' },
           { value: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', desc: '兼容旧路由与旧配置' },
