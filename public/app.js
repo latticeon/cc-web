@@ -6558,12 +6558,12 @@
     if (!ws || ws.readyState > 1) {
       // WS is dead, force reconnect
       connect();
-    } else if (ws.readyState === 1 && currentSessionId) {
-      // Preserve active streaming UI when returning to foreground.
-      if (isGenerating || currentSessionRunning) {
+    } else if (ws.readyState === 1) {
+      send({ type: 'list_sessions' });
+      // Only re-sync the current session while a task is still running.
+      // Reloading an idle session rebuilds the message list and forces scroll to bottom.
+      if (currentSessionId && (isGenerating || currentSessionRunning)) {
         send({ type: 'load_session', sessionId: currentSessionId });
-      } else {
-        beginSessionSwitch(currentSessionId, { blocking: false, force: true });
       }
     }
   });
