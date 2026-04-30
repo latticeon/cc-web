@@ -814,7 +814,7 @@ body.session-loading-active {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
   padding-left: 4px;
 }
@@ -879,12 +879,12 @@ body.session-loading-active {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
   background: rgba(232, 190, 92, 0.16);
   border: 1px solid rgba(212, 163, 58, 0.28);
   color: #9a6f14;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.04em;
   flex-shrink: 0;
@@ -2708,11 +2708,18 @@ html[data-theme='coolvibe'] .settings-back:hover {
   border: none;
   background: none;
   border-radius: 0;
-  max-width: none;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.chat-cwd:hover { color: var(--text-secondary); }
+.chat-cwd.expanded {
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-all;
-  cursor: default;
 }
 
 .ns-local-layout {

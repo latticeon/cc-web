@@ -266,6 +266,7 @@
   let uploadingAttachments = [];
   let loginPasswordValue = ''; // store login password for force-change flow
   let currentCwd = null;
+  let currentCwdExpanded = false;
   let currentSessionRunning = false;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
@@ -1256,15 +1257,19 @@
   function updateCwdBadge() {
     if (!chatCwd || !chatCwdRow) return;
     if (currentCwd) {
-      chatCwd.textContent = currentCwd;
+      chatCwd.textContent = currentCwdExpanded ? currentCwd : (getPathLeaf(currentCwd) || currentCwd);
       chatCwd.title = currentCwd;
+      chatCwd.setAttribute('aria-label', currentCwdExpanded ? '点击收起项目路径' : `完整路径: ${currentCwd}`);
+      chatCwd.classList.toggle('expanded', currentCwdExpanded);
     } else {
       chatCwd.textContent = '';
       chatCwd.title = '';
+      chatCwd.removeAttribute('aria-label');
+      chatCwd.classList.remove('expanded');
     }
-    const hidden = !currentCwd;
-    chatCwd.hidden = hidden;
-    chatCwdRow.hidden = hidden;
+    chatCwd.hidden = !currentCwd;
+    chatCwdRow.hidden = !currentCwd && !currentSessionRunning;
+    if (chatRuntimeState) chatRuntimeState.hidden = !currentSessionRunning;
   }
 
   function setCurrentSessionRunningState(isRunning) {
@@ -1519,6 +1524,7 @@
     clearSessionLoading();
     setCurrentSessionRunningState(false);
     currentCwd = null;
+    currentCwdExpanded = false;
     currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
     isGenerating = false;
     pendingText = '';
@@ -1554,6 +1560,7 @@
     setCurrentSessionRunningState(snapshot.isRunning);
     setStatsDisplay(snapshot);
     currentCwd = snapshot.cwd || null;
+    currentCwdExpanded = false;
     updateCwdBadge();
     if (snapshot.mode && MODE_LABELS[snapshot.mode]) {
       currentMode = snapshot.mode;
@@ -3821,6 +3828,14 @@
     thinkingPickerBtn.addEventListener('click', () => {
       if (!currentSessionId || getAgentModelControl(currentAgent)?.kind !== 'reasoning') return;
       showCodexThinkingPicker();
+    });
+  }
+
+  if (chatCwd) {
+    chatCwd.addEventListener('click', () => {
+      if (!currentCwd) return;
+      currentCwdExpanded = !currentCwdExpanded;
+      updateCwdBadge();
     });
   }
 
