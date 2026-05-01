@@ -2036,6 +2036,44 @@ body.session-loading-active {
   flex-shrink: 0;
 }
 
+/* === Click Tip === */
+.click-tip {
+  position: fixed;
+  z-index: 900;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 20px));
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 10px 30px rgba(45, 31, 20, 0.18);
+  animation: fadeIn 0.12s ease;
+}
+.click-tip-arrow {
+  position: absolute;
+  top: -6px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  border-left: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+.click-tip-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.click-tip-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* === Mobile === */
 @media (max-width: 768px) {
   .sidebar {

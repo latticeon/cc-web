@@ -269,6 +269,7 @@
   let currentCwdExpanded = false;
   let currentSessionRunning = false;
   let currentSessionMessages = [];
+  let activeClickTip = null;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
   let kimiConfigCache = null;
@@ -1265,12 +1266,16 @@
     if (currentCwd) {
       chatCwd.textContent = currentCwdExpanded ? currentCwd : (getPathLeaf(currentCwd) || currentCwd);
       chatCwd.title = currentCwd;
-      chatCwd.setAttribute('aria-label', currentCwdExpanded ? '点击收起项目路径' : `完整路径: ${currentCwd}`);
+      chatCwd.setAttribute('aria-label', `完整路径: ${currentCwd}`);
+      chatCwd.dataset.tipTitle = '项目目录';
+      chatCwd.dataset.tipBody = currentCwd;
       chatCwd.classList.toggle('expanded', currentCwdExpanded);
     } else {
       chatCwd.textContent = '';
       chatCwd.title = '';
       chatCwd.removeAttribute('aria-label');
+      chatCwd.removeAttribute('data-tip-title');
+      chatCwd.removeAttribute('data-tip-body');
       chatCwd.classList.remove('expanded');
     }
     chatCwd.hidden = !currentCwd;
@@ -1468,6 +1473,8 @@
     if (!currentSessionId || (!estimatedTokens && !contextLimit)) {
       chatContextRow.hidden = true;
       chatContextText.textContent = '';
+      chatContextRow.removeAttribute('data-tip-title');
+      chatContextRow.removeAttribute('data-tip-body');
       chatContextRow.style.setProperty('--context-progress', '0%');
       chatContextRow.classList.remove('is-warn', 'is-danger');
       updateCwdBadge();
@@ -1483,6 +1490,8 @@
       chatContextText.textContent = `${formatTokenCount(estimatedTokens)} / ${formatTokenCount(contextLimit)} tokens (${percent.toFixed(percent >= 10 ? 0 : 1)}%)`;
       chatContextRow.title = `上下文占用估算: ${chatContextText.textContent}`;
       chatContextRow.setAttribute('aria-label', chatContextRow.title);
+      chatContextRow.dataset.tipTitle = '上下文占用估算';
+      chatContextRow.dataset.tipBody = `当前估算：${formatTokenCount(estimatedTokens)} tokens\n最大上下文：${formatTokenCount(contextLimit)} tokens\n占用比例：${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
       chatContextRow.style.setProperty('--context-progress', `${percent}%`);
       chatContextRow.classList.toggle('is-warn', ratio >= 0.7 && ratio < 0.9);
       chatContextRow.classList.toggle('is-danger', ratio >= 0.9);
@@ -1493,6 +1502,8 @@
     chatContextText.textContent = `${formatTokenCount(estimatedTokens)} tokens`;
     chatContextRow.title = `上下文占用估算: ${chatContextText.textContent}`;
     chatContextRow.setAttribute('aria-label', chatContextRow.title);
+    chatContextRow.dataset.tipTitle = '上下文占用估算';
+    chatContextRow.dataset.tipBody = `当前估算：${formatTokenCount(estimatedTokens)} tokens\n当前模型未获取到最大上下文，暂不显示百分比。`;
     chatContextRow.style.setProperty('--context-progress', '0%');
     chatContextRow.classList.remove('is-warn', 'is-danger');
     updateCwdBadge();
@@ -3899,6 +3910,67 @@
     }
   }
 
+  function hideClickTip() {
+    if (activeClickTip?.el) activeClickTip.el.remove();
+    document.removeEventListener('click', handleClickTipOutside, true);
+    document.removeEventListener('keydown', handleClickTipEscape);
+    activeClickTip = null;
+  }
+
+  function handleClickTipOutside(e) {
+    if (!activeClickTip) return;
+    if (activeClickTip.anchor?.contains(e.target) || activeClickTip.el?.contains(e.target)) return;
+    hideClickTip();
+  }
+
+  function handleClickTipEscape(e) {
+    if (e.key === 'Escape') hideClickTip();
+  }
+
+  function positionClickTip(tip, arrow, anchor) {
+    const rect = anchor.getBoundingClientRect();
+    const margin = 10;
+    const tipRect = tip.getBoundingClientRect();
+    const top = rect.bottom + 10;
+    let left = rect.left + rect.width / 2 - tipRect.width / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(Math.min(top, window.innerHeight - tipRect.height - margin))}px`;
+    const arrowLeft = rect.left + rect.width / 2 - left - 6;
+    arrow.style.left = `${Math.round(Math.max(12, Math.min(arrowLeft, tipRect.width - 24)))}px`;
+  }
+
+  function showClickTip(anchor, { title = '', body = '' } = {}) {
+    if (!anchor || (!title && !body)) return;
+    const sameAnchor = activeClickTip?.anchor === anchor;
+    hideClickTip();
+    if (sameAnchor) return;
+
+    const tip = document.createElement('div');
+    tip.className = 'click-tip';
+    tip.setAttribute('role', 'dialog');
+    const arrow = document.createElement('span');
+    arrow.className = 'click-tip-arrow';
+    tip.appendChild(arrow);
+    if (title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'click-tip-title';
+      titleEl.textContent = title;
+      tip.appendChild(titleEl);
+    }
+    if (body) {
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'click-tip-body';
+      bodyEl.textContent = body;
+      tip.appendChild(bodyEl);
+    }
+    document.body.appendChild(tip);
+    activeClickTip = { anchor, el: tip };
+    positionClickTip(tip, arrow, anchor);
+    document.addEventListener('click', handleClickTipOutside, true);
+    document.addEventListener('keydown', handleClickTipEscape);
+  }
+
 	  function showModelPicker() {
 	    const modelControl = getAgentModelControl(currentAgent);
 	    if (!modelControl) return;
@@ -4068,10 +4140,21 @@
   }
 
   if (chatCwd) {
-    chatCwd.addEventListener('click', () => {
+    chatCwd.addEventListener('click', (e) => {
       if (!currentCwd) return;
-      currentCwdExpanded = !currentCwdExpanded;
-      updateCwdBadge();
+      e.stopPropagation();
+      showClickTip(chatCwd, { title: '项目目录', body: currentCwd });
+    });
+  }
+
+  if (chatContextRow) {
+    chatContextRow.addEventListener('click', (e) => {
+      if (chatContextRow.hidden) return;
+      e.stopPropagation();
+      showClickTip(chatContextRow, {
+        title: chatContextRow.dataset.tipTitle || '上下文占用估算',
+        body: chatContextRow.dataset.tipBody || chatContextText?.textContent || '',
+      });
     });
   }
 
