@@ -818,6 +818,60 @@ body.session-loading-active {
   min-width: 0;
   padding-left: 4px;
 }
+.chat-context-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 4px 0;
+}
+.chat-context-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.chat-context-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.chat-context-text {
+  min-width: 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-context-progress {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.4), rgba(255,255,255,0)) padding-box,
+    color-mix(in srgb, var(--bg-tertiary) 88%, var(--accent) 12%);
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, var(--accent) 20%);
+}
+.chat-context-progress-bar {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 72%, #ffffff 28%));
+  transition: width 0.2s ease, background 0.2s ease;
+}
+.chat-context-progress-bar.is-warn {
+  background: linear-gradient(90deg, #d38a34, #f0b65d);
+}
+.chat-context-progress-bar.is-danger {
+  background: linear-gradient(90deg, #c94d3f, #ef7a6b);
+}
 .menu-btn {
   display: none;
   background: none;
@@ -2046,6 +2100,10 @@ body.session-loading-active {
   .chat-header-bottom {
     padding-left: 40px;
   }
+  .chat-context-row {
+    padding-left: 40px;
+    padding-right: 0;
+  }
   .chat-cwd {
     max-width: none;
     font-size: 11px;
@@ -2078,6 +2136,16 @@ body.session-loading-active {
   }
   .chat-header-bottom {
     padding-left: 38px;
+  }
+  .chat-context-row {
+    padding-left: 38px;
+    padding-right: 0;
+  }
+  .chat-context-meta {
+    gap: 8px;
+  }
+  .chat-context-text {
+    font-size: 10px;
   }
   .chat-header-chip-btn {
     max-width: 84px;

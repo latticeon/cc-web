@@ -268,8 +268,10 @@
   let currentCwd = null;
   let currentCwdExpanded = false;
   let currentSessionRunning = false;
+  let currentSessionMessages = [];
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
+  let kimiConfigCache = null;
 
   // --- DOM ---
   const $ = (sel) => document.querySelector(sel);
@@ -296,6 +298,10 @@
   const chatRuntimeState = $('#chat-runtime-state');
   const chatCwdRow = $('#chat-cwd-row');
   const chatCwd = $('#chat-cwd');
+  const chatContextRow = $('#chat-context-row');
+  const chatContextLabel = $('#chat-context-label');
+  const chatContextText = $('#chat-context-text');
+  const chatContextProgressBar = $('#chat-context-progress-bar');
   const costDisplay = $('#cost-display');
   const attachmentTray = $('#attachment-tray');
   const imageUploadInput = $('#image-upload-input');
@@ -1305,6 +1311,186 @@
     return normalized || '默认思考';
   }
 
+  function normalizeTokenCount(value) {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? Math.round(num) : 0;
+  }
+
+  function formatTokenCount(value) {
+    const num = normalizeTokenCount(value);
+    if (num >= 1_000_000) {
+      const compact = (num / 1_000_000).toFixed(num >= 10_000_000 ? 0 : 1).replace(/\.0$/, '');
+      return `${compact}M`;
+    }
+    if (num >= 1_000) {
+      const compact = (num / 1_000).toFixed(num >= 10_000 ? 0 : 1).replace(/\.0$/, '');
+      return `${compact}k`;
+    }
+    return `${num}`;
+  }
+
+  function extractTextFromContentNode(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map(extractTextFromContentNode).join('\n');
+    if (!content || typeof content !== 'object') return '';
+    if (typeof content.text === 'string') return content.text;
+    if (typeof content.content === 'string') return content.content;
+    if (Array.isArray(content.content)) return content.content.map(extractTextFromContentNode).join('\n');
+    return '';
+  }
+
+  function estimateMessageContextTokens(message) {
+    if (!message || typeof message !== 'object') return 0;
+    if (message.role === 'system') return 0;
+    let chars = 0;
+    chars += extractTextFromContentNode(message.content).length;
+    if (Array.isArray(message.steps)) {
+      for (const step of message.steps) {
+        if (!step || typeof step !== 'object') continue;
+        chars += extractTextFromContentNode(step.content).length;
+        chars += extractTextFromContentNode(step.result).length;
+        chars += extractTextFromContentNode(step.input).length;
+      }
+    }
+    if (Array.isArray(message.toolCalls)) {
+      for (const toolCall of message.toolCalls) {
+        if (!toolCall || typeof toolCall !== 'object') continue;
+        chars += JSON.stringify(toolCall).length;
+      }
+    }
+    if (Array.isArray(message.attachments)) {
+      chars += message.attachments.length * 120;
+    }
+    if (message.role === 'assistant') chars += 80;
+    if (message.role === 'user') chars += 48;
+    return Math.max(1, Math.ceil(chars / 4));
+  }
+
+  function estimateMessagesContextTokens(messages) {
+    return (Array.isArray(messages) ? messages : []).reduce((sum, message) => sum + estimateMessageContextTokens(message), 0);
+  }
+
+  function estimateActiveDraftContextTokens() {
+    if (!isGenerating) return 0;
+    let chars = String(pendingText || '').length;
+    for (const toolCall of activeToolCalls.values()) {
+      try {
+        chars += JSON.stringify(toolCall || {}).length;
+      } catch {
+        chars += 0;
+      }
+    }
+    return chars > 0 ? Math.ceil(chars / 4) : 0;
+  }
+
+  function getActiveKimiProfile() {
+    const config = kimiConfigCache;
+    if (!config || config.mode !== 'custom') return null;
+    const profiles = Array.isArray(config.profiles) ? config.profiles : [];
+    const active = String(config.activeProfile || '').trim();
+    return profiles.find((profile) => profile && profile.name === active) || null;
+  }
+
+  function resolveCustomKimiModelContext(modelName) {
+    const profile = getActiveKimiProfile();
+    if (!profile) return 0;
+    const models = Array.isArray(profile.models) ? profile.models : [];
+    const match = models.find((item) => item && (item.name === modelName || item.model === modelName));
+    return normalizeTokenCount(match?.maxContextSize);
+  }
+
+  function resolveDynamicModelContext(agent, modelName) {
+    const normalizedAgent = normalizeAgent(agent);
+    const value = String(modelName || '').trim();
+    if (!value) return 0;
+
+    if (normalizedAgent === 'kimi') {
+      const customContext = resolveCustomKimiModelContext(value);
+      if (customContext > 0) return customContext;
+    }
+
+    const models = agentModelOptionsCache.get(normalizedAgent);
+    if (!Array.isArray(models)) return 0;
+    const match = models.find((item) => {
+      if (!item) return false;
+      if (typeof item === 'string') return item === value;
+      return item.id === value || item.model === value || item.value === value || item.name === value;
+    });
+    return normalizeTokenCount(match?.maxContextSize || match?.max_context_size);
+  }
+
+  function resolveClaudeContextLimit(modelName) {
+    const value = String(modelName || '').trim().toLowerCase();
+    if (!value) return 0;
+    if (value === 'opus' || value === 'sonnet') return 1_000_000;
+    if (value.includes('[1m]')) return 1_000_000;
+    if (value.includes('opus') || value.includes('sonnet')) return 1_000_000;
+    if (value === 'haiku' || value.includes('haiku')) return 262144;
+    return 0;
+  }
+
+  function resolveCodexContextLimit(modelName) {
+    const value = String(modelName || '').trim();
+    if (!value) return 0;
+    const base = _splitCodexThinkingModel(value).base || value;
+    const profiles = Array.isArray(codexConfigCache?.profiles) ? codexConfigCache.profiles : [];
+    const localContext = profiles
+      .map((profile) => normalizeTokenCount(profile?.maxContextSize))
+      .find((limit) => limit > 0);
+    if (localContext > 0) return localContext;
+    if (/^gpt-5\./i.test(base)) return 262144;
+    return 0;
+  }
+
+  function resolveKimiContextLimit(modelName) {
+    const dynamic = resolveDynamicModelContext('kimi', modelName);
+    if (dynamic > 0) return dynamic;
+    return 0;
+  }
+
+  function resolveCurrentContextLimit() {
+    const modelName = String(currentModel || '').trim();
+    if (!modelName) return 0;
+    if (currentAgent === 'claude') return resolveClaudeContextLimit(modelName);
+    if (currentAgent === 'codex') return resolveCodexContextLimit(modelName);
+    if (currentAgent === 'kimi') return resolveKimiContextLimit(modelName);
+    if (currentAgent === 'codebuddy' || currentAgent === 'opencode') {
+      return resolveDynamicModelContext(currentAgent, modelName);
+    }
+    return 0;
+  }
+
+  function updateContextUsageDisplay() {
+    if (!chatContextRow || !chatContextText || !chatContextProgressBar || !chatContextLabel) return;
+    const estimatedTokens = estimateMessagesContextTokens(currentSessionMessages) + estimateActiveDraftContextTokens();
+    const contextLimit = resolveCurrentContextLimit();
+
+    if (!currentSessionId || (!estimatedTokens && !contextLimit)) {
+      chatContextRow.hidden = true;
+      chatContextText.textContent = '';
+      chatContextProgressBar.style.width = '0%';
+      chatContextProgressBar.classList.remove('is-warn', 'is-danger');
+      return;
+    }
+
+    chatContextRow.hidden = false;
+    chatContextLabel.textContent = '上下文占用估算';
+
+    if (contextLimit > 0) {
+      const ratio = Math.min(estimatedTokens / contextLimit, 1);
+      const percent = Math.min(ratio * 100, 100);
+      chatContextText.textContent = `${formatTokenCount(estimatedTokens)} / ${formatTokenCount(contextLimit)} tokens (${percent.toFixed(percent >= 10 ? 0 : 1)}%)`;
+      chatContextProgressBar.style.width = `${percent}%`;
+      chatContextProgressBar.classList.toggle('is-warn', ratio >= 0.7 && ratio < 0.9);
+      chatContextProgressBar.classList.toggle('is-danger', ratio >= 0.9);
+      return;
+    }
+
+    chatContextText.textContent = `${formatTokenCount(estimatedTokens)} tokens`;
+    chatContextProgressBar.style.width = '0%';
+    chatContextProgressBar.classList.remove('is-warn', 'is-danger');
+  }
+
   function normalizeDynamicModelOption(model, modelControl, fallbackDesc) {
     const sourceLabel = modelControl?.sourceLabel || '可用模型';
     if (model && typeof model === 'object' && !Array.isArray(model)) {
@@ -1444,6 +1630,7 @@
       modelPickerBtn.disabled = true;
       thinkingPickerBtn.hidden = true;
       thinkingPickerBtn.disabled = true;
+      updateContextUsageDisplay();
       return;
     }
 
@@ -1462,6 +1649,7 @@
       thinkingPickerBtn.title = hasSession
         ? `当前 Thinking 强度: ${codexState.level || '默认'}`
         : `请先打开或创建一个 ${agentSpec.label} 会话`;
+      updateContextUsageDisplay();
       return;
     }
 
@@ -1475,6 +1663,7 @@
         : `请先打开或创建一个 ${agentSpec?.label || 'Agent'} 会话`;
       thinkingPickerBtn.hidden = true;
       thinkingPickerBtn.disabled = true;
+      updateContextUsageDisplay();
       return;
     }
 
@@ -1489,6 +1678,7 @@
       : `请先打开或创建一个 ${agentSpec?.label || 'Agent'} 会话`;
     thinkingPickerBtn.hidden = true;
     thinkingPickerBtn.disabled = true;
+    updateContextUsageDisplay();
   }
 
   function renderImportSessionMenu() {
@@ -1525,6 +1715,7 @@
     setCurrentSessionRunningState(false);
     currentCwd = null;
     currentCwdExpanded = false;
+    currentSessionMessages = [];
     currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
     isGenerating = false;
     pendingText = '';
@@ -1537,6 +1728,7 @@
     updateCwdBadge();
     messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
     setStatsDisplay(null);
+    updateContextUsageDisplay();
     renderPendingAttachments();
     highlightActiveSession();
     updateModelControls();
@@ -1559,6 +1751,7 @@
     setCurrentAgent(snapshot.agent);
     setCurrentSessionRunningState(snapshot.isRunning);
     setStatsDisplay(snapshot);
+    currentSessionMessages = cloneMessages(snapshot.messages || []);
     currentCwd = snapshot.cwd || null;
     currentCwdExpanded = false;
     updateCwdBadge();
@@ -1572,6 +1765,7 @@
     if (!preserveStreaming) {
       renderMessages(snapshot.messages || [], { immediate: !!options.immediate });
     }
+    updateContextUsageDisplay();
     highlightActiveSession();
     renderSessionList();
     if (!options.skipCloseSidebar) closeSidebar();
@@ -1708,14 +1902,17 @@
       if ((usage.inputTokens || 0) > 0 || (usage.outputTokens || 0) > 0) {
         const cacheText = usage.cachedInputTokens ? ` · cache ${usage.cachedInputTokens}` : '';
         costDisplay.textContent = `in ${usage.inputTokens} · out ${usage.outputTokens}${cacheText}`;
+        updateContextUsageDisplay();
         return;
       }
     }
     if (msg && typeof msg.totalCost === 'number' && msg.totalCost > 0) {
       costDisplay.textContent = `$${msg.totalCost.toFixed(4)}`;
+      updateContextUsageDisplay();
       return;
     }
     costDisplay.textContent = '';
+    updateContextUsageDisplay();
   }
 
 	  function _splitCodexThinkingModel(model) {
@@ -2100,15 +2297,19 @@
 
       case 'model_config':
         if (typeof _onModelConfig === 'function') _onModelConfig(msg.config);
+        updateContextUsageDisplay();
         break;
 
       case 'codex_config':
         codexConfigCache = msg.config || null;
         if (typeof _onCodexConfig === 'function') _onCodexConfig(msg.config);
+        updateContextUsageDisplay();
         break;
 
       case 'kimi_config':
+        kimiConfigCache = msg.config || null;
         if (typeof _onKimiConfig === 'function') _onKimiConfig(msg.config);
+        updateContextUsageDisplay();
         break;
 
       case 'cli_install_status':
@@ -2140,6 +2341,10 @@
           const resolve = pendingAgentModelRequests.get(msg.requestId);
           pendingAgentModelRequests.delete(msg.requestId);
           resolve(msg);
+        }
+        if (msg.agent && Array.isArray(msg.models)) {
+          agentModelOptionsCache.set(normalizeAgent(msg.agent), msg.models);
+          updateContextUsageDisplay();
         }
         break;
 
@@ -2210,6 +2415,7 @@
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
     ensureStreamingTextStep(msgEl);
     messagesDiv.appendChild(msgEl);
+    updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
   }
@@ -2231,6 +2437,14 @@
     }
 
     if (sessionId) currentSessionId = sessionId;
+    if (pendingText.trim() || activeToolCalls.size > 0) {
+      currentSessionMessages.push({
+        role: 'assistant',
+        content: pendingText,
+        steps: buildLegacyAssistantSteps(pendingText, Array.from(activeToolCalls.values()).map((tool) => deepClone(tool))),
+      });
+    }
+    updateContextUsageDisplay();
     pendingText = '';
     activeToolCalls.clear();
     syncLastUserResendAction();
@@ -2252,6 +2466,7 @@
     if (!textStep) return;
     setAssistantTextStepContent(textStep, pendingText);
     updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), { complete: false, running: true });
+    updateContextUsageDisplay();
     scrollToBottom();
   }
 
@@ -2594,6 +2809,8 @@
 
     const nextPayload = { text, attachments: cloneResendAttachments(attachments) };
     messagesDiv.appendChild(createMsgElement('user', text, attachments, { resendPayload: nextPayload }));
+    currentSessionMessages.push({ role: 'user', content: text, attachments: cloneResendAttachments(attachments) });
+    updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
 
@@ -2773,12 +2990,14 @@
 	  }
 
   function renderMessages(messages, options = {}) {
+    currentSessionMessages = cloneMessages(messages || []);
     renderEpoch++;
     const epoch = renderEpoch;
     messagesDiv.innerHTML = '';
     if (messages.length === 0) {
       messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
       syncLastUserResendAction();
+      updateContextUsageDisplay();
       return;
     }
     if (options.immediate) {
@@ -2786,6 +3005,7 @@
       messages.forEach((message, index) => frag.appendChild(buildMsgElement(message, { allowResend: index === messages.length - 1 })));
       messagesDiv.appendChild(frag);
       syncLastUserResendAction();
+      updateContextUsageDisplay();
       scrollToBottom();
       return;
     }
@@ -2808,6 +3028,7 @@
     for (let i = batches[0][0]; i < batches[0][1]; i++) frag0.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1 }));
     messagesDiv.appendChild(frag0);
     syncLastUserResendAction();
+    updateContextUsageDisplay();
     scrollToBottom();
 
     // Render remaining batches asynchronously, prepending each
@@ -2833,6 +3054,8 @@
 
   function prependHistoryMessages(messages, options = {}) {
     if (!Array.isArray(messages) || messages.length === 0) return;
+    currentSessionMessages = cloneMessages(messages).concat(currentSessionMessages);
+    updateContextUsageDisplay();
     const preserveScroll = options.preserveScroll !== false;
     const skipScrollbar = options.skipScrollbar === true;
     const welcome = messagesDiv.querySelector('.welcome-msg');
@@ -3179,6 +3402,8 @@
     const welcome = messagesDiv.querySelector('.welcome-msg');
     if (welcome) welcome.remove();
     messagesDiv.appendChild(createMsgElement('system', message));
+    currentSessionMessages.push({ role: 'system', content: message });
+    updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
   }
@@ -3188,6 +3413,8 @@
     div.className = 'msg system';
     div.innerHTML = `<div class="msg-bubble" style="border-color:var(--danger);color:var(--danger)">⚠ ${escapeHtml(message)}</div>`;
     messagesDiv.appendChild(div);
+    currentSessionMessages.push({ role: 'system', content: `⚠ ${message}` });
+    updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
   }
@@ -3764,6 +3991,8 @@
     messagesDiv.appendChild(createMsgElement('user', text, attachments, {
       resendPayload: { text, attachments: cloneResendAttachments(attachments) },
     }));
+    currentSessionMessages.push({ role: 'user', content: text, attachments: cloneResendAttachments(attachments) });
+    updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
 
