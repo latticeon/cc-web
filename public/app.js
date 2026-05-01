@@ -1274,7 +1274,7 @@
       chatCwd.classList.remove('expanded');
     }
     chatCwd.hidden = !currentCwd;
-    chatCwdRow.hidden = !currentCwd && !currentSessionRunning;
+    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && (!chatContextRow || chatContextRow.hidden);
     if (chatRuntimeState) chatRuntimeState.hidden = !currentSessionRunning;
   }
 
@@ -1468,8 +1468,9 @@
     if (!currentSessionId || (!estimatedTokens && !contextLimit)) {
       chatContextRow.hidden = true;
       chatContextText.textContent = '';
-      chatContextProgressBar.style.width = '0%';
-      chatContextProgressBar.classList.remove('is-warn', 'is-danger');
+      chatContextRow.style.setProperty('--context-progress', '0%');
+      chatContextRow.classList.remove('is-warn', 'is-danger');
+      updateCwdBadge();
       return;
     }
 
@@ -1480,15 +1481,21 @@
       const ratio = Math.min(estimatedTokens / contextLimit, 1);
       const percent = Math.min(ratio * 100, 100);
       chatContextText.textContent = `${formatTokenCount(estimatedTokens)} / ${formatTokenCount(contextLimit)} tokens (${percent.toFixed(percent >= 10 ? 0 : 1)}%)`;
-      chatContextProgressBar.style.width = `${percent}%`;
-      chatContextProgressBar.classList.toggle('is-warn', ratio >= 0.7 && ratio < 0.9);
-      chatContextProgressBar.classList.toggle('is-danger', ratio >= 0.9);
+      chatContextRow.title = `上下文占用估算: ${chatContextText.textContent}`;
+      chatContextRow.setAttribute('aria-label', chatContextRow.title);
+      chatContextRow.style.setProperty('--context-progress', `${percent}%`);
+      chatContextRow.classList.toggle('is-warn', ratio >= 0.7 && ratio < 0.9);
+      chatContextRow.classList.toggle('is-danger', ratio >= 0.9);
+      updateCwdBadge();
       return;
     }
 
     chatContextText.textContent = `${formatTokenCount(estimatedTokens)} tokens`;
-    chatContextProgressBar.style.width = '0%';
-    chatContextProgressBar.classList.remove('is-warn', 'is-danger');
+    chatContextRow.title = `上下文占用估算: ${chatContextText.textContent}`;
+    chatContextRow.setAttribute('aria-label', chatContextRow.title);
+    chatContextRow.style.setProperty('--context-progress', '0%');
+    chatContextRow.classList.remove('is-warn', 'is-danger');
+    updateCwdBadge();
   }
 
   function normalizeDynamicModelOption(model, modelControl, fallbackDesc) {
