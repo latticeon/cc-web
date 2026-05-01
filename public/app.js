@@ -73,10 +73,10 @@
           { value: 'gpt-5.2', label: 'GPT-5.2', desc: '通用 OpenAI 兼容模型' },
         ],
         thinkingOptions: [
-          { value: '', label: '默认思考', desc: '不附加 thinking 强度' },
-          { value: 'medium', label: 'medium', desc: '中等 thinking' },
-          { value: 'high', label: 'high', desc: '更强 thinking' },
-          { value: 'xhigh', label: 'xhigh', desc: '最强 thinking' },
+          { value: 'low', label: '低', desc: '低强度 thinking' },
+          { value: 'medium', label: '中', desc: '中等 thinking' },
+          { value: 'high', label: '高', desc: '高强度 thinking' },
+          { value: 'xhigh', label: '最强', desc: '最强 thinking' },
         ],
       },
       import: {
@@ -1299,7 +1299,7 @@
     const fallback = modelControl?.baseOptions?.[0]?.value || 'gpt-5.4';
     return {
       base: _isCodexModelAtLeast52(parsed.base) ? parsed.base : fallback,
-      level: parsed.level || '',
+      level: parsed.level || 'medium',
     };
   }
 
@@ -1313,7 +1313,8 @@
 
   function getThinkingLevelLabel(level) {
     const normalized = String(level || '').trim().toLowerCase();
-    return normalized || '默认思考';
+    const option = (getAgentModelControl(currentAgent)?.thinkingOptions || []).find((item) => item.value === normalized);
+    return option?.label || normalized || '中';
   }
 
   function normalizeTokenCount(value) {
