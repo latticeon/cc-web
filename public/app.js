@@ -273,6 +273,8 @@
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
   let kimiConfigCache = null;
+  let isSessionMultiSelectMode = false;
+  let selectedSessionIds = new Set();
 
   // --- DOM ---
   const $ = (sel) => document.querySelector(sel);
@@ -292,6 +294,10 @@
   const newChatBtn = $('#new-chat-btn');
   const newChatArrow = $('#new-chat-arrow');
   const newChatDropdown = $('#new-chat-dropdown');
+  const sessionMultiSelectBtn = $('#session-multiselect-btn');
+  const sessionSelectAllBtn = $('#session-select-all-btn');
+  const sessionInvertSelectBtn = $('#session-invert-select-btn');
+  const sessionClearBtn = $('#session-clear-btn');
   const sessionList = $('#session-list');
   const chatTitle = $('#chat-title');
   const modelPickerBtn = $('#model-picker-btn');
@@ -1227,6 +1233,71 @@
 
   function getVisibleSessions() {
     return sessions;
+  }
+
+  function syncSelectedSessionsWithVisible() {
+    const visibleIds = new Set(getVisibleSessions().map((session) => session.id));
+    selectedSessionIds = new Set(Array.from(selectedSessionIds).filter((id) => visibleIds.has(id)));
+    if (isSessionMultiSelectMode && visibleIds.size === 0) {
+      isSessionMultiSelectMode = false;
+      selectedSessionIds.clear();
+    }
+  }
+
+  function setSessionMultiSelectMode(enabled) {
+    const nextEnabled = !!enabled && getVisibleSessions().length > 0;
+    isSessionMultiSelectMode = nextEnabled;
+    if (!nextEnabled) {
+      selectedSessionIds.clear();
+    } else {
+      syncSelectedSessionsWithVisible();
+    }
+    updateSessionBulkActionBar();
+    renderSessionList();
+  }
+
+  function updateSessionBulkActionBar() {
+    if (!sessionMultiSelectBtn || !sessionClearBtn || !sessionSelectAllBtn || !sessionInvertSelectBtn) return;
+    const visibleCount = getVisibleSessions().length;
+    const selectedCount = selectedSessionIds.size;
+    const allSelected = visibleCount > 0 && selectedCount === visibleCount;
+    sessionMultiSelectBtn.classList.toggle('active', isSessionMultiSelectMode);
+    sessionMultiSelectBtn.textContent = isSessionMultiSelectMode ? '取消多选' : '多选';
+    sessionMultiSelectBtn.disabled = visibleCount === 0;
+    sessionClearBtn.classList.toggle('danger', visibleCount > 0);
+    if (isSessionMultiSelectMode) {
+      sessionSelectAllBtn.hidden = false;
+      sessionInvertSelectBtn.hidden = false;
+      sessionSelectAllBtn.disabled = visibleCount === 0 || allSelected;
+      sessionInvertSelectBtn.disabled = visibleCount === 0;
+      sessionClearBtn.textContent = selectedCount > 0 ? `删除已选(${selectedCount})` : '删除已选';
+      sessionClearBtn.disabled = selectedCount === 0;
+    } else {
+      sessionSelectAllBtn.hidden = true;
+      sessionInvertSelectBtn.hidden = true;
+      sessionSelectAllBtn.disabled = true;
+      sessionInvertSelectBtn.disabled = true;
+      sessionClearBtn.textContent = '清空';
+      sessionClearBtn.disabled = visibleCount === 0;
+    }
+  }
+
+  function selectAllVisibleSessions() {
+    selectedSessionIds = new Set(getVisibleSessions().map((session) => session.id));
+    updateSessionBulkActionBar();
+    renderSessionList();
+  }
+
+  function invertVisibleSessionSelection() {
+    const nextSelected = new Set();
+    getVisibleSessions().forEach((session) => {
+      if (!selectedSessionIds.has(session.id)) {
+        nextSelected.add(session.id);
+      }
+    });
+    selectedSessionIds = nextSelected;
+    updateSessionBulkActionBar();
+    renderSessionList();
   }
 
   function renderSessionAgentBadge(agent) {
@@ -3387,18 +3458,21 @@
     return '删除本会话将同步删除本地 Claude 中的会话历史，不可恢复。确认删除？';
   }
 
-  function showDeleteConfirm(agent, onConfirm) {
+  function showDangerConfirm(message, onConfirm, options = {}) {
     const overlay = document.createElement('div');
     overlay.className = 'settings-overlay';
     overlay.style.zIndex = '10002';
+    const confirmLabel = options.confirmLabel || '确认删除';
+    const skipLabel = options.skipLabel || '确认且不再提示';
+    const enableSkip = options.enableSkip !== false;
 
     const box = document.createElement('div');
     box.className = 'settings-panel';
     box.innerHTML = `
-      <div style="font-size:0.9em;color:var(--text-primary);margin-bottom:20px;line-height:1.7">${escapeHtml(getDeleteConfirmMessage(agent))}</div>
+      <div style="font-size:0.9em;color:var(--text-primary);margin-bottom:20px;line-height:1.7">${escapeHtml(message)}</div>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <button id="del-confirm-ok" style="width:100%;padding:10px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:0.95em;font-weight:600;cursor:pointer;font-family:inherit">确认删除</button>
-        <button id="del-confirm-skip" style="width:100%;padding:9px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-tertiary);color:var(--text-secondary);font-size:0.85em;cursor:pointer;font-family:inherit">确认且不再提示</button>
+        <button id="del-confirm-ok" style="width:100%;padding:10px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:0.95em;font-weight:600;cursor:pointer;font-family:inherit">${escapeHtml(confirmLabel)}</button>
+        ${enableSkip ? `<button id="del-confirm-skip" style="width:100%;padding:9px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-tertiary);color:var(--text-secondary);font-size:0.85em;cursor:pointer;font-family:inherit">${escapeHtml(skipLabel)}</button>` : ''}
         <button id="del-confirm-cancel" style="width:100%;padding:9px;border:none;border-radius:10px;background:transparent;color:var(--text-muted);font-size:0.85em;cursor:pointer;font-family:inherit">取消</button>
       </div>
     `;
@@ -3407,14 +3481,65 @@
 
     const close = () => document.body.removeChild(overlay);
     box.querySelector('#del-confirm-ok').addEventListener('click', () => { close(); onConfirm(); });
-    box.querySelector('#del-confirm-skip').addEventListener('click', () => {
-      skipDeleteConfirm = true;
-      localStorage.setItem('cc-web-skip-delete-confirm', '1');
-      close();
-      onConfirm();
-    });
+    if (enableSkip) {
+      box.querySelector('#del-confirm-skip').addEventListener('click', () => {
+        skipDeleteConfirm = true;
+        localStorage.setItem('cc-web-skip-delete-confirm', '1');
+        close();
+        onConfirm();
+      });
+    }
     box.querySelector('#del-confirm-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  }
+
+  function showDeleteConfirm(agent, onConfirm) {
+    showDangerConfirm(getDeleteConfirmMessage(agent), onConfirm);
+  }
+
+  function performSessionDelete(session) {
+    if (!session?.id) return;
+    if (getLastSessionForAgent(currentAgent) === session.id) {
+      localStorage.removeItem(getAgentSessionStorageKey(currentAgent));
+    }
+    selectedSessionIds.delete(session.id);
+    invalidateSessionCache(session.id);
+    send({ type: 'delete_session', sessionId: session.id });
+    if (session.id === currentSessionId) {
+      resetChatView(currentAgent);
+    }
+    updateSessionBulkActionBar();
+  }
+
+  function requestDeleteSession(session, options = {}) {
+    if (!session?.id) return;
+    if (skipDeleteConfirm || options.skipConfirm) {
+      performSessionDelete(session);
+    } else {
+      showDeleteConfirm(session.agent, () => performSessionDelete(session));
+    }
+  }
+
+  function deleteSessionsBatch(targetSessions, options = {}) {
+    const items = Array.from(targetSessions || []).filter((session) => session?.id);
+    if (!items.length) return;
+    const runDelete = () => {
+      items.forEach((session) => requestDeleteSession(session, { skipConfirm: true }));
+      if (options.exitMultiSelect !== false) {
+        setSessionMultiSelectMode(false);
+      } else {
+        renderSessionList();
+      }
+    };
+    if (skipDeleteConfirm || options.skipConfirm) {
+      runDelete();
+      return;
+    }
+    const message = options.message || `确认删除选中的 ${items.length} 个会话？此操作不可恢复。`;
+    showDangerConfirm(message, runDelete, {
+      confirmLabel: options.confirmLabel || '确认删除',
+      enableSkip: false,
+    });
   }
 
   function appendSystemMessage(message) {
@@ -3519,6 +3644,8 @@
   function renderSessionList() {
     sessionList.innerHTML = '';
     const visibleSessions = getVisibleSessions();
+    syncSelectedSessionsWithVisible();
+    updateSessionBulkActionBar();
     if (visibleSessions.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'session-list-empty';
@@ -3531,9 +3658,15 @@
       const directoryMeta = getSessionDirectoryMeta(s);
       const agentBadge = renderSessionAgentBadge(s.agent);
       const item = document.createElement('div');
-      item.className = `session-item${s.id === currentSessionId ? ' active' : ''}`;
+      const isSelected = selectedSessionIds.has(s.id);
+      item.className = `session-item${s.id === currentSessionId ? ' active' : ''}${isSessionMultiSelectMode ? ' selecting' : ''}${isSelected ? ' selected' : ''}`;
       item.dataset.id = s.id;
       item.innerHTML = `
+        ${isSessionMultiSelectMode ? `
+          <label class="session-item-selector" title="选择会话">
+            <input class="session-item-checkbox" type="checkbox" ${isSelected ? 'checked' : ''}>
+          </label>
+        ` : ''}
         <div class="session-item-main">
           <div class="session-item-title-row">
             <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
@@ -3560,23 +3693,20 @@
 
       item.addEventListener('click', (e) => {
         const target = e.target;
+        if (isSessionMultiSelectMode) {
+          if (target.classList.contains('edit') || target.classList.contains('delete')) {
+            e.stopPropagation();
+            return;
+          }
+          const nextSelected = !selectedSessionIds.has(s.id);
+          if (nextSelected) selectedSessionIds.add(s.id);
+          else selectedSessionIds.delete(s.id);
+          renderSessionList();
+          return;
+        }
         if (target.classList.contains('delete')) {
           e.stopPropagation();
-          const doDelete = () => {
-            if (getLastSessionForAgent(currentAgent) === s.id) {
-              localStorage.removeItem(getAgentSessionStorageKey(currentAgent));
-            }
-            invalidateSessionCache(s.id);
-            send({ type: 'delete_session', sessionId: s.id });
-            if (s.id === currentSessionId) {
-              resetChatView(currentAgent);
-            }
-          };
-          if (skipDeleteConfirm) {
-            doDelete();
-          } else {
-            showDeleteConfirm(s.agent, doDelete);
-          }
+          requestDeleteSession(s);
           return;
         }
         if (target.classList.contains('edit')) {
@@ -4215,6 +4345,43 @@
       appendSystemMessage('⚠ 由于项目设计与 CLI 原生逻辑不同，默认模式的授权申请功能暂未实现，建议搭配 Plan 或 YOLO 模式使用。');
     }
   });
+
+  if (sessionMultiSelectBtn) {
+    sessionMultiSelectBtn.addEventListener('click', () => {
+      setSessionMultiSelectMode(!isSessionMultiSelectMode);
+    });
+  }
+
+  if (sessionSelectAllBtn) {
+    sessionSelectAllBtn.addEventListener('click', () => {
+      if (!isSessionMultiSelectMode) return;
+      selectAllVisibleSessions();
+    });
+  }
+
+  if (sessionInvertSelectBtn) {
+    sessionInvertSelectBtn.addEventListener('click', () => {
+      if (!isSessionMultiSelectMode) return;
+      invertVisibleSessionSelection();
+    });
+  }
+
+  if (sessionClearBtn) {
+    sessionClearBtn.addEventListener('click', () => {
+      const visibleSessions = getVisibleSessions();
+      if (isSessionMultiSelectMode) {
+        const selectedSessions = visibleSessions.filter((session) => selectedSessionIds.has(session.id));
+        deleteSessionsBatch(selectedSessions, {
+          message: `确认删除选中的 ${selectedSessions.length} 个会话？此操作不可恢复。`,
+        });
+        return;
+      }
+      deleteSessionsBatch(visibleSessions, {
+        message: `确认清空当前列表中的 ${visibleSessions.length} 个会话？此操作不可恢复。`,
+        confirmLabel: '确认清空',
+      });
+    });
+  }
 
   msgInput.addEventListener('input', () => {
     autoResize();
