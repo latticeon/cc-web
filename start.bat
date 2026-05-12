@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
 set "PORT=8002"
-set "HOST=127.0.0.1"
+set "HOST=0.0.0.0"
 
 if exist ".env" (
     for /f "usebackq tokens=1,* delims==" %%A in (".env") do (

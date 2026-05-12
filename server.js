@@ -2,6 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 const { createAgentRuntime } = require('./lib/agent-runtime');
@@ -27,6 +28,35 @@ if (fs.existsSync(envPath)) {
 const PORT = parseInt(process.env.PORT) || 8002;
 const HOST = process.env.HOST || '127.0.0.1';
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
+function getLanIPv4Addresses() {
+  const interfaces = os.networkInterfaces();
+  const addresses = [];
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.family !== 'IPv4' || entry.internal) continue;
+      if (entry.address.startsWith('169.254.')) continue;
+      addresses.push(entry.address);
+    }
+  }
+  return [...new Set(addresses)];
+}
+
+function printAccessUrls() {
+  console.log('CC-Web server listening:');
+  console.log(`  Local: http://127.0.0.1:${PORT}`);
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    const lanAddresses = getLanIPv4Addresses();
+    if (lanAddresses.length > 0) {
+      for (const address of lanAddresses) {
+        console.log(`  LAN:   http://${address}:${PORT}`);
+      }
+    } else {
+      console.log('  LAN:   No LAN IPv4 address detected');
+    }
+    return;
+  }
+  console.log(`  Host:  http://${HOST}:${PORT}`);
+}
 function isConfiguredCliPathUsable(rawValue) {
   const value = String(rawValue || '').trim();
   if (!value) return false;
@@ -6757,5 +6787,5 @@ setInterval(() => {
 plog('INFO', 'server_start', { port: PORT, host: HOST });
 
 server.listen(PORT, HOST, () => {
-  console.log(`CC-Web server listening on ${HOST}:${PORT}`);
+  printAccessUrls();
 });
