@@ -259,6 +259,7 @@
   let currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
   let currentTheme = (document.documentElement.dataset.theme || localStorage.getItem('cc-web-theme') || 'washi');
   let codexConfigCache = null;
+  let codebuddyConfigCache = null;
   let loadedHistorySessionId = null;
   let activeSessionLoad = null;
   let sidebarSwipe = null;
@@ -269,6 +270,7 @@
   let currentCwdExpanded = false;
   let currentSessionRunning = false;
   let currentSessionMessages = [];
+  let currentCodebuddyProfile = '';
   let activeClickTip = null;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
@@ -303,6 +305,7 @@
   const modelPickerBtn = $('#model-picker-btn');
   const thinkingPickerBtn = $('#thinking-picker-btn');
   const chatRuntimeState = $('#chat-runtime-state');
+  const chatCodebuddyProfile = $('#chat-codebuddy-profile');
   const chatCwdRow = $('#chat-cwd-row');
   const chatCwd = $('#chat-cwd');
   const chatContextRow = $('#chat-context-row');
@@ -885,6 +888,7 @@
       totalUsage: payload.totalUsage ? deepClone(payload.totalUsage) : null,
       updated: payload.updated || null,
       isRunning: !!payload.isRunning,
+      codebuddyProfile: payload.codebuddyProfile || '',
       historyPending: !!payload.historyPending,
       complete: options.complete !== undefined ? !!options.complete : !payload.historyPending,
     };
@@ -1334,6 +1338,12 @@
 
   function updateCwdBadge() {
     if (!chatCwd || !chatCwdRow) return;
+    const showCodebuddyProfile = currentAgent === 'codebuddy' && !!currentCodebuddyProfile;
+    if (chatCodebuddyProfile) {
+      chatCodebuddyProfile.textContent = showCodebuddyProfile ? currentCodebuddyProfile : '';
+      chatCodebuddyProfile.title = showCodebuddyProfile ? `CodeBuddy Profile: ${currentCodebuddyProfile}` : '';
+      chatCodebuddyProfile.hidden = !showCodebuddyProfile;
+    }
     if (currentCwd) {
       chatCwd.textContent = currentCwdExpanded ? currentCwd : (getPathLeaf(currentCwd) || currentCwd);
       chatCwd.title = currentCwd;
@@ -1350,7 +1360,7 @@
       chatCwd.classList.remove('expanded');
     }
     chatCwd.hidden = !currentCwd;
-    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && (!chatContextRow || chatContextRow.hidden);
+    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && !showCodebuddyProfile && (!chatContextRow || chatContextRow.hidden);
     if (chatRuntimeState) chatRuntimeState.hidden = !currentSessionRunning;
   }
 
@@ -1799,6 +1809,7 @@
 
   function resetChatView(agent) {
     setCurrentAgent(agent);
+    currentCodebuddyProfile = '';
     currentSessionId = null;
     loadedHistorySessionId = null;
     clearSessionLoading();
@@ -1839,6 +1850,7 @@
     setLastSessionForAgent(snapshot.agent, currentSessionId);
     chatTitle.textContent = snapshot.title || '新会话';
     setCurrentAgent(snapshot.agent);
+    currentCodebuddyProfile = snapshot.codebuddyProfile || '';
     setCurrentSessionRunningState(snapshot.isRunning);
     setStatsDisplay(snapshot);
     currentSessionMessages = cloneMessages(snapshot.messages || []);
@@ -2393,6 +2405,12 @@
       case 'codex_config':
         codexConfigCache = msg.config || null;
         if (typeof _onCodexConfig === 'function') _onCodexConfig(msg.config);
+        updateContextUsageDisplay();
+        break;
+
+      case 'codebuddy_config':
+        codebuddyConfigCache = msg.config || null;
+        if (typeof _onCodebuddyConfig === 'function') _onCodebuddyConfig(msg.config);
         updateContextUsageDisplay();
         break;
 
@@ -4485,6 +4503,7 @@
   let _onNotifyTestResult = null;
   let _onModelConfig = null;
   let _onCodexConfig = null;
+  let _onCodebuddyConfig = null;
   let _onKimiConfig = null;
   let _onCliInstallStatus = null;
   let _onFetchModelsResult = null;
@@ -4783,6 +4802,7 @@
   function showSettingsPanel() {
     send({ type: 'get_model_config' });
     send({ type: 'get_codex_config' });
+    send({ type: 'get_codebuddy_config' });
     send({ type: 'get_kimi_config' });
     send({ type: 'get_notify_config' });
     send({ type: 'get_cli_install_status' });
@@ -4910,21 +4930,204 @@
 
     // === CodeBuddy Config UI ===
     const codebuddyConfigArea = panel.querySelector('#codebuddy-config-area');
+    const codebuddyStatus = document.createElement('div');
+    codebuddyStatus.className = 'settings-status';
+    codebuddyConfigArea.insertAdjacentElement('afterend', codebuddyStatus);
+    const codebuddyActions = document.createElement('div');
+    codebuddyActions.className = 'settings-actions';
+    codebuddyActions.innerHTML = '<button class="btn-save" id="codebuddy-save-btn">保存 CodeBuddy 配置</button>';
+    codebuddyStatus.insertAdjacentElement('beforebegin', codebuddyActions);
+    const codebuddySaveBtn = codebuddyActions.querySelector('#codebuddy-save-btn');
+    let currentCodebuddyConfig = null;
+    let codebuddyEditingProfiles = [];
+    let codebuddyActiveProfile = '';
+
+    function showCodebuddyStatus(msg, type) {
+      codebuddyStatus.textContent = msg;
+      codebuddyStatus.className = 'settings-status ' + (type || '');
+    }
 
     function renderCodebuddyConfigArea() {
+      const isLocal = codebuddyActiveProfile === '';
+      const profileOptions = codebuddyEditingProfiles.map((profile) =>
+        `<option value="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</option>`
+      ).join('');
+
+      if (isLocal) {
+        codebuddyConfigArea.innerHTML = `
+          <div class="settings-field">
+            <label>激活 Profile</label>
+            <div style="display:flex;gap:6px;align-items:center">
+              <select class="settings-select" id="codebuddy-profile-select" style="flex:1">
+                <option value="__local__" selected>本地登录态</option>
+                ${profileOptions}
+                <option value="__new__">+ 新建 Profile</option>
+              </select>
+              <button class="btn-test" id="codebuddy-info-btn" style="padding:4px 10px">说明</button>
+            </div>
+          </div>
+          <div class="settings-inline-note">
+            直接复用本机 <code>codebuddy</code> / <code>cbc</code> CLI 当前登录态。切到自定义 Profile 后，仅为新建会话注入对应凭据，不改写本机 <code>.codebuddy</code>。
+          </div>
+        `;
+        panel.querySelector('#codebuddy-profile-select').addEventListener('change', (e) => {
+          if (e.target.value === '__new__') {
+            openCodebuddyProfileModal();
+          } else if (e.target.value === '__local__') {
+            codebuddyActiveProfile = '';
+            renderCodebuddyConfigArea();
+          } else {
+            codebuddyActiveProfile = e.target.value;
+            renderCodebuddyConfigArea();
+          }
+        });
+        panel.querySelector('#codebuddy-info-btn').addEventListener('click', showCodebuddyLocalInfoModal);
+        return;
+      }
+
+      const currentProfile = codebuddyEditingProfiles.find((profile) => profile.name === codebuddyActiveProfile);
+      const summary = [];
+      if (currentProfile?.authToken) summary.push('Auth Token 已设置');
+      if (currentProfile?.apiKey) summary.push('API Key 已设置');
       codebuddyConfigArea.innerHTML = `
-        <div class="settings-inline-note">
-          CC-Web 当前直接复用本机 <code>codebuddy</code> / <code>cbc</code> CLI 的登录态与默认配置，不额外保存 API Key 或 Profile。
-          模型切换请使用会话顶部模型选择器或 <code>/model</code>，上下文压缩可直接使用 <code>/compact</code>。
+        <div class="settings-field">
+          <label>激活 Profile</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select class="settings-select" id="codebuddy-profile-select" style="flex:1">
+              <option value="__local__">本地登录态</option>
+              ${profileOptions}
+              <option value="__new__">+ 新建 Profile</option>
+            </select>
+            <button class="btn-test" id="codebuddy-profile-edit" style="padding:4px 10px">编辑</button>
+            <button class="btn-test" id="codebuddy-profile-del" title="删除" style="padding:4px 8px">删除</button>
+          </div>
         </div>
-        <div class="settings-actions">
-          <button class="btn-test" id="codebuddy-info-btn" style="padding:4px 10px">说明</button>
+        <div class="settings-inline-note">
+          当前 Profile：<strong>${escapeHtml(currentProfile?.name || '未选择')}</strong>${summary.length ? ` · ${escapeHtml(summary.join(' / '))}` : ' · 未填写凭据'}
         </div>
       `;
-      panel.querySelector('#codebuddy-info-btn').addEventListener('click', showCodebuddyLocalInfoModal);
+      panel.querySelector('#codebuddy-profile-select').addEventListener('change', (e) => {
+        if (e.target.value === '__new__') {
+          openCodebuddyProfileModal();
+        } else if (e.target.value === '__local__') {
+          codebuddyActiveProfile = '';
+          renderCodebuddyConfigArea();
+        } else {
+          codebuddyActiveProfile = e.target.value;
+          renderCodebuddyConfigArea();
+        }
+      });
+      panel.querySelector('#codebuddy-profile-edit').addEventListener('click', () => openCodebuddyProfileModal(codebuddyActiveProfile));
+      panel.querySelector('#codebuddy-profile-del').addEventListener('click', () => {
+        if (!codebuddyActiveProfile) return;
+        if (!confirm(`确认删除 CodeBuddy Profile「${codebuddyActiveProfile}」?`)) return;
+        codebuddyEditingProfiles = codebuddyEditingProfiles.filter((profile) => profile.name !== codebuddyActiveProfile);
+        codebuddyActiveProfile = codebuddyEditingProfiles[0]?.name || '';
+        renderCodebuddyConfigArea();
+      });
     }
 
     renderCodebuddyConfigArea();
+
+    function openCodebuddyProfileModal(profileName = '') {
+      const current = profileName
+        ? codebuddyEditingProfiles.find((profile) => profile.name === profileName)
+        : null;
+      const draft = current
+        ? { ...current, _originalName: current.name }
+        : { name: '', authToken: '', apiKey: '', _originalName: '' };
+      const modalOverlay = document.createElement('div');
+      modalOverlay.className = 'settings-overlay';
+      modalOverlay.style.zIndex = '10001';
+      const modal = document.createElement('div');
+      modal.className = 'settings-panel';
+      modal.style.maxWidth = '460px';
+      modal.innerHTML = `
+        <div class="settings-header">
+          <h3>${profileName ? '编辑' : '新建'} CodeBuddy Profile</h3>
+          <button class="settings-close" id="codebuddy-profile-close">&times;</button>
+        </div>
+        <div class="settings-field">
+          <label>Profile 名称</label>
+          <input type="text" id="codebuddy-profile-name" value="${escapeHtml(draft.name)}" placeholder="例如：主账号">
+        </div>
+        <div class="settings-field">
+          <label>Auth Token</label>
+          <input type="text" id="codebuddy-profile-auth-token" value="${escapeHtml(draft.authToken || '')}" placeholder="CODEBUDDY_AUTH_TOKEN">
+        </div>
+        <div class="settings-field">
+          <label>API Key</label>
+          <input type="text" id="codebuddy-profile-api-key" value="${escapeHtml(draft.apiKey || '')}" placeholder="CODEBUDDY_API_KEY">
+        </div>
+        <div class="settings-inline-note">
+          至少填写一项凭据。保存后仅影响新建的 CodeBuddy 会话；已有会话会继续使用原先绑定的 Profile。
+        </div>
+        <div class="settings-actions">
+          <button class="btn-save" id="codebuddy-profile-ok">确定</button>
+        </div>
+      `;
+      modalOverlay.appendChild(modal);
+      document.body.appendChild(modalOverlay);
+      const closeModal = () => document.body.removeChild(modalOverlay);
+      modal.querySelector('#codebuddy-profile-close').addEventListener('click', closeModal);
+      modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+      modal.querySelector('#codebuddy-profile-ok').addEventListener('click', () => {
+        const name = modal.querySelector('#codebuddy-profile-name').value.trim();
+        const authToken = modal.querySelector('#codebuddy-profile-auth-token').value.trim();
+        const apiKey = modal.querySelector('#codebuddy-profile-api-key').value.trim();
+        if (!name) {
+          alert('请输入 Profile 名称');
+          return;
+        }
+        if (!authToken && !apiKey) {
+          alert('Auth Token 和 API Key 至少填写一项');
+          return;
+        }
+        const duplicated = codebuddyEditingProfiles.find((profile) => profile.name === name && profile.name !== draft._originalName);
+        if (duplicated) {
+          alert('Profile 名称已存在');
+          return;
+        }
+        const next = {
+          name,
+          authToken,
+          apiKey,
+          _originalName: draft._originalName,
+        };
+        if (draft._originalName) {
+          const index = codebuddyEditingProfiles.findIndex((profile) => profile.name === draft._originalName);
+          if (index >= 0) codebuddyEditingProfiles[index] = next;
+          else codebuddyEditingProfiles.push(next);
+        } else {
+          codebuddyEditingProfiles.push(next);
+        }
+        codebuddyActiveProfile = name;
+        closeModal();
+        renderCodebuddyConfigArea();
+      });
+    }
+
+    codebuddySaveBtn.addEventListener('click', () => {
+      const isLocal = codebuddyActiveProfile === '';
+      const config = {
+        mode: isLocal ? 'local' : 'custom',
+        activeProfile: isLocal ? '' : codebuddyActiveProfile,
+        profiles: codebuddyEditingProfiles,
+      };
+      send({ type: 'save_codebuddy_config', config });
+      showCodebuddyStatus('已保存', 'success');
+    });
+
+    _onCodebuddyConfig = (config) => {
+      currentCodebuddyConfig = config;
+      codebuddyEditingProfiles = (config?.profiles || []).map((profile) => ({ ...profile, _originalName: profile.name }));
+      if (config?.mode === 'local') {
+        codebuddyActiveProfile = '';
+      } else {
+        codebuddyActiveProfile = config?.activeProfile || (codebuddyEditingProfiles[0]?.name || '');
+      }
+      renderCodebuddyConfigArea();
+    };
 
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
@@ -5236,11 +5439,11 @@
           <button class="settings-close" id="codebuddy-info-close">&times;</button>
         </div>
         <div class="settings-inline-note">
-          当前接入方式会直接调用本机 <code>codebuddy</code>（或别名 <code>cbc</code>）CLI，并沿用你已经在 CLI 中完成的登录态和默认配置，不会改写本机文件。
+          当前接入方式会直接调用本机 <code>codebuddy</code>（或别名 <code>cbc</code>）CLI。
           <br><br>
-          如果需要切换模型，请在会话顶部模型选择器里选择，或在对话中执行 <code>/model</code>；继续同一上下文时，CC-Web 会自动复用当前会话对应的 CodeBuddy session。
+          选中"本地登录态"时，会直接沿用你本机已有的 CodeBuddy CLI 登录态，不改写本机 <code>.codebuddy</code>。
           <br><br>
-          当前设置页暂不提供 CodeBuddy 专属 Profile 编辑器；如需调整 CLI 级别配置，请直接在本机 CodeBuddy CLI 环境中完成。
+          选中自定义 Profile 后，CC-Web 只会在启动新的 CodeBuddy 会话时注入对应的 <code>CODEBUDDY_AUTH_TOKEN</code> / <code>CODEBUDDY_API_KEY</code>，用于实现多账号切换；已有会话不会被强行切换。
         </div>
         <div class="settings-actions">
           <button class="btn-save" id="codebuddy-info-ok">确定</button>
@@ -6455,6 +6658,7 @@
 
   function showNewSessionModal() {
     let selectedAgent = normalizeAgent(currentAgent);
+    let selectedCodebuddyProfile = '';
     const initialLabel = getAgentDefinition(selectedAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -6508,6 +6712,29 @@
       return localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo';
     }
 
+    function getCodebuddyProfileOptions() {
+      const profiles = Array.isArray(codebuddyConfigCache?.profiles) ? codebuddyConfigCache.profiles : [];
+      return profiles.filter((profile) => profile && profile.name);
+    }
+
+    function syncSelectedCodebuddyProfile() {
+      if (selectedAgent !== 'codebuddy') {
+        selectedCodebuddyProfile = '';
+        return;
+      }
+      const profiles = getCodebuddyProfileOptions();
+      const localMode = (codebuddyConfigCache?.mode || 'local') === 'local';
+      if (localMode) {
+        selectedCodebuddyProfile = '';
+        return;
+      }
+      const activeProfile = String(codebuddyConfigCache?.activeProfile || '').trim();
+      const fallback = profiles[0]?.name || '';
+      if (!selectedCodebuddyProfile || !profiles.some((profile) => profile.name === selectedCodebuddyProfile)) {
+        selectedCodebuddyProfile = activeProfile || fallback;
+      }
+    }
+
     function renderAgentOptions() {
       if (!agentGrid) return;
       agentGrid.innerHTML = AGENT_CATALOG.map((agent) => `
@@ -6527,6 +6754,7 @@
           const nextAgent = normalizeAgent(button.dataset.nsAgent);
           if (nextAgent === selectedAgent) return;
           selectedAgent = nextAgent;
+          syncSelectedCodebuddyProfile();
           selectedQuickCwd = '';
           selectedSuggestedCwd = '';
           cwdSuggestionItems = [];
@@ -6555,6 +6783,7 @@
     tabRemote.addEventListener('click', () => switchTab('remote'));
     renderAgentOptions();
     switchTab('local');
+    syncSelectedCodebuddyProfile();
 
     // --- Local task view ---
     let selectedLocalMode = 'manual';
@@ -6600,9 +6829,19 @@
       const quickDirs = getQuickDirs();
       const historyItems = cwdSuggestionItems.filter((item) => !quickDirs.includes(item.path));
       syncLocalSelection(quickDirs, historyItems);
+      const codebuddyProfiles = getCodebuddyProfileOptions();
+      const showCodebuddyProfilePicker = selectedAgent === 'codebuddy' && codebuddyProfiles.length > 0 && (codebuddyConfigCache?.mode || 'local') === 'custom';
 
       localView.innerHTML = `
         <div class="ns-local-layout">
+          ${showCodebuddyProfilePicker ? `
+            <div>
+              <div class="modal-field-label" style="margin-bottom:6px">CodeBuddy 账号</div>
+              <select class="settings-select" id="ns-codebuddy-profile-select">
+                ${codebuddyProfiles.map((profile) => `<option value="${escapeHtml(profile.name)}" ${profile.name === selectedCodebuddyProfile ? 'selected' : ''}>${escapeHtml(profile.name)}</option>`).join('')}
+              </select>
+            </div>
+          ` : ''}
           ${quickDirs.length > 0 ? `
             <div>
               <div class="modal-field-label" style="margin-bottom:6px">常用目录</div>
@@ -6745,6 +6984,13 @@
           if (freshInput) freshInput.focus();
         });
       }
+
+      const codebuddyProfileSelect = localView.querySelector('#ns-codebuddy-profile-select');
+      if (codebuddyProfileSelect) {
+        codebuddyProfileSelect.addEventListener('change', () => {
+          selectedCodebuddyProfile = codebuddyProfileSelect.value || '';
+        });
+      }
     }
 
     _onCwdSuggestions = (payload) => {
@@ -6829,7 +7075,7 @@
         }
         close();
         saveRecentCwd(cwd);
-        send({ type: 'new_session', cwd, agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'local' });
+        send({ type: 'new_session', cwd, agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'local', codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '' });
       } else {
         // Remote task
         if (!selectedHostId) {
@@ -6838,7 +7084,7 @@
         }
         const remoteCwd = remoteView.querySelector('#ns-remote-cwd')?.value?.trim() || '';
         close();
-        send({ type: 'new_session', agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'remote', sshHostId: selectedHostId, remoteCwd });
+        send({ type: 'new_session', agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'remote', sshHostId: selectedHostId, remoteCwd, codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '' });
       }
     });
   }

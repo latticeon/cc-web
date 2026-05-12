@@ -188,6 +188,7 @@ const NOTIFY_CONFIG_PATH = path.join(CONFIG_DIR, 'notify.json');
 const AUTH_CONFIG_PATH = path.join(CONFIG_DIR, 'auth.json');
 const MODEL_CONFIG_PATH = path.join(CONFIG_DIR, 'model.json');
 const CODEX_CONFIG_PATH = path.join(CONFIG_DIR, 'codex.json');
+const CODEBUDDY_CONFIG_PATH = path.join(CONFIG_DIR, 'codebuddy.json');
 const KIMI_CONFIG_PATH = path.join(CONFIG_DIR, 'kimi.json');
 const BANNED_IPS_PATH = path.join(CONFIG_DIR, 'banned_ips.json');
 
@@ -876,6 +877,12 @@ const DEFAULT_CODEX_CONFIG = {
   localSnapshot: {},  // saved snapshot of local ~/.codex config (archive-only, no restore)
 };
 
+const DEFAULT_CODEBUDDY_CONFIG = {
+  mode: 'local',
+  activeProfile: '',
+  profiles: [],
+};
+
 const KIMI_PROVIDER_TYPES = new Set([
   'kimi',
   'openai_legacy',
@@ -897,6 +904,14 @@ const DEFAULT_KIMI_CONFIG = {
   activeProfile: '',
   profiles: [],
 };
+
+function sanitizeCodebuddyProfile(rawProfile) {
+  return {
+    name: String(rawProfile?.name || '').trim(),
+    authToken: String(rawProfile?.authToken || ''),
+    apiKey: String(rawProfile?.apiKey || ''),
+  };
+}
 
 function normalizeKimiCapabilityList(rawList) {
   if (!Array.isArray(rawList)) return [];
@@ -1009,6 +1024,24 @@ function loadKimiConfig() {
   return JSON.parse(JSON.stringify(DEFAULT_KIMI_CONFIG));
 }
 
+function loadCodebuddyConfig() {
+  try {
+    if (fs.existsSync(CODEBUDDY_CONFIG_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(CODEBUDDY_CONFIG_PATH, 'utf8'));
+      const profiles = Array.isArray(raw?.profiles)
+        ? raw.profiles.map((profile) => sanitizeCodebuddyProfile(profile)).filter((profile) => profile.name)
+        : [];
+      const activeProfile = String(raw?.activeProfile || '').trim();
+      return {
+        mode: raw?.mode === 'custom' ? 'custom' : 'local',
+        activeProfile: profiles.some((profile) => profile.name === activeProfile) ? activeProfile : '',
+        profiles,
+      };
+    }
+  } catch {}
+  return JSON.parse(JSON.stringify(DEFAULT_CODEBUDDY_CONFIG));
+}
+
 function saveCodexConfig(config) {
   fs.writeFileSync(CODEX_CONFIG_PATH, JSON.stringify({
     mode: config.mode === 'custom' ? 'custom' : 'local',
@@ -1028,6 +1061,18 @@ function saveKimiConfig(config) {
     : [];
   const activeProfile = String(config?.activeProfile || '').trim();
   fs.writeFileSync(KIMI_CONFIG_PATH, JSON.stringify({
+    mode: config?.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: profiles.some((profile) => profile.name === activeProfile) ? activeProfile : '',
+    profiles,
+  }, null, 2));
+}
+
+function saveCodebuddyConfig(config) {
+  const profiles = Array.isArray(config?.profiles)
+    ? config.profiles.map((profile) => sanitizeCodebuddyProfile(profile)).filter((profile) => profile.name)
+    : [];
+  const activeProfile = String(config?.activeProfile || '').trim();
+  fs.writeFileSync(CODEBUDDY_CONFIG_PATH, JSON.stringify({
     mode: config?.mode === 'custom' ? 'custom' : 'local',
     activeProfile: profiles.some((profile) => profile.name === activeProfile) ? activeProfile : '',
     profiles,
@@ -1079,6 +1124,19 @@ function getKimiConfigMasked() {
         fetchBase: profile.services?.fetchBase || '',
         fetchApiKey: maskSecret(profile.services?.fetchApiKey || ''),
       },
+    })),
+  };
+}
+
+function getCodebuddyConfigMasked() {
+  const config = loadCodebuddyConfig();
+  return {
+    mode: config.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: config.activeProfile || '',
+    profiles: (config.profiles || []).map((profile) => ({
+      name: profile.name,
+      authToken: maskSecret(profile.authToken),
+      apiKey: maskSecret(profile.apiKey),
     })),
   };
 }
@@ -1575,6 +1633,7 @@ function normalizeSession(session) {
   if (!Object.prototype.hasOwnProperty.call(session, 'taskMode')) session.taskMode = 'local';
   if (!Object.prototype.hasOwnProperty.call(session, 'sshHostId')) session.sshHostId = '';
   if (!Object.prototype.hasOwnProperty.call(session, 'remoteCwd')) session.remoteCwd = '';
+  if (!Object.prototype.hasOwnProperty.call(session, 'codebuddyProfile')) session.codebuddyProfile = '';
   if (!Object.prototype.hasOwnProperty.call(session, 'messages')) session.messages = [];
   if (Array.isArray(session.messages)) {
     session.messages = session.messages.map((message) => {
@@ -3132,6 +3191,12 @@ wss.on('connection', (ws, req) => {
       case 'save_codex_config':
         handleSaveCodexConfig(ws, msg.config);
         break;
+      case 'get_codebuddy_config':
+        wsSend(ws, { type: 'codebuddy_config', config: getCodebuddyConfigMasked() });
+        break;
+      case 'save_codebuddy_config':
+        handleSaveCodebuddyConfig(ws, msg.config);
+        break;
       case 'get_kimi_config':
         wsSend(ws, { type: 'kimi_config', config: getKimiConfigMasked() });
         break;
@@ -3425,6 +3490,57 @@ function mergeMaskedSecret(nextValue, currentValue) {
   const raw = String(nextValue || '');
   if (!raw) return '';
   return raw.includes('****') ? String(currentValue || '') : raw;
+}
+
+function resolveActiveCodebuddyProfile(config) {
+  if (!config || config.mode !== 'custom') return null;
+  const profiles = Array.isArray(config.profiles) ? config.profiles : [];
+  return profiles.find((profile) => profile.name === config.activeProfile) || null;
+}
+
+function buildCodebuddyEnvFromProfile(profile) {
+  const env = {};
+  if (!profile) return env;
+  if (profile.authToken) env.CODEBUDDY_AUTH_TOKEN = profile.authToken;
+  if (profile.apiKey) env.CODEBUDDY_API_KEY = profile.apiKey;
+  return env;
+}
+
+function handleSaveCodebuddyConfig(ws, newConfig) {
+  if (!newConfig || typeof newConfig !== 'object') {
+    return wsSend(ws, { type: 'error', message: '无效的 CodeBuddy 配置' });
+  }
+
+  const current = loadCodebuddyConfig();
+  const oldProfiles = Array.isArray(current.profiles) ? current.profiles : [];
+  const mergedProfiles = [];
+  for (const rawProfile of Array.isArray(newConfig.profiles) ? newConfig.profiles : []) {
+    const sanitized = sanitizeCodebuddyProfile(rawProfile);
+    if (!sanitized.name) continue;
+    const originalName = String(rawProfile?._originalName || rawProfile?.name || '').trim();
+    const oldProfile = oldProfiles.find((profile) => profile.name === originalName || profile.name === sanitized.name) || null;
+    sanitized.authToken = mergeMaskedSecret(rawProfile?.authToken, oldProfile?.authToken);
+    sanitized.apiKey = mergeMaskedSecret(rawProfile?.apiKey, oldProfile?.apiKey);
+    mergedProfiles.push(sanitized);
+  }
+
+  const merged = {
+    mode: newConfig.mode === 'custom' ? 'custom' : 'local',
+    activeProfile: String(newConfig.activeProfile || '').trim(),
+    profiles: mergedProfiles,
+  };
+  if (merged.mode === 'custom' && merged.profiles.length > 0 && !merged.profiles.some((profile) => profile.name === merged.activeProfile)) {
+    merged.activeProfile = merged.profiles[0].name;
+  }
+
+  saveCodebuddyConfig(merged);
+  plog('INFO', 'codebuddy_config_saved', {
+    mode: merged.mode,
+    activeProfile: merged.activeProfile || null,
+    profileCount: merged.profiles.length,
+  });
+  wsSend(ws, { type: 'codebuddy_config', config: getCodebuddyConfigMasked() });
+  wsSend(ws, { type: 'system_message', message: 'CodeBuddy 配置已保存' });
 }
 
 function handleSaveKimiConfig(ws, newConfig) {
@@ -3970,6 +4086,7 @@ function handleNewSession(ws, msg) {
   const taskMode = msg?.taskMode === 'remote' ? 'remote' : 'local';
   const sshHostId = String(msg?.sshHostId || '').trim();
   const remoteCwd = String(msg?.remoteCwd || '').trim();
+  const requestedCodebuddyProfile = String(msg?.codebuddyProfile || '').trim();
 
   let resolvedCwd = cwd || resolveAgentDefaultCwd(agent);
   let hostInfo = null;
@@ -4003,7 +4120,17 @@ function handleNewSession(ws, msg) {
     taskMode,
     sshHostId: taskMode === 'remote' ? sshHostId : '',
     remoteCwd: taskMode === 'remote' ? remoteCwd : '',
+    codebuddyProfile: '',
   };
+  if (agent === 'codebuddy') {
+    const codebuddyConfig = loadCodebuddyConfig();
+    const availableProfiles = Array.isArray(codebuddyConfig.profiles) ? codebuddyConfig.profiles : [];
+    if (codebuddyConfig.mode === 'custom' && requestedCodebuddyProfile && availableProfiles.some((profile) => profile.name === requestedCodebuddyProfile)) {
+      session.codebuddyProfile = requestedCodebuddyProfile;
+    } else {
+      session.codebuddyProfile = codebuddyConfig.mode === 'custom' ? String(codebuddyConfig.activeProfile || '').trim() : '';
+    }
+  }
   saveSession(session);
   wsSessionMap.set(ws, id);
   wsSend(ws, {
@@ -4024,6 +4151,7 @@ function handleNewSession(ws, msg) {
     taskMode: session.taskMode,
     sshHostId: session.sshHostId,
     remoteCwd: session.remoteCwd,
+    codebuddyProfile: session.codebuddyProfile || '',
   });
   sendSessionList(ws);
 
@@ -4751,6 +4879,7 @@ const {
   applyCustomTemplateToSettings,
   loadCodexConfig,
   prepareCodexCustomRuntime,
+  loadCodebuddyConfig,
   loadKimiConfig,
   prepareKimiCustomRuntime,
   wsSend,
@@ -5602,7 +5731,13 @@ function runCodebuddyCommandCapture(args = [], timeoutMs = CODEBUDDY_MODEL_LIST_
 
     let child = null;
     try {
+      const codebuddyConfig = loadCodebuddyConfig();
+      const activeProfile = resolveActiveCodebuddyProfile(codebuddyConfig);
       child = spawn(cliSpec.command, cliSpec.args, {
+        env: {
+          ...process.env,
+          ...buildCodebuddyEnvFromProfile(activeProfile),
+        },
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
