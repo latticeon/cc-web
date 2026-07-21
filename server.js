@@ -4761,11 +4761,16 @@ function handleAbort(ws) {
   if (!entry) return;
 
   plog('INFO', 'user_abort', { sessionId: sessionId.slice(0, 8), pid: entry.pid });
-  killProcess(entry.pid);
-  setTimeout(() => {
+  if (IS_WIN) {
     killProcess(entry.pid, true);
-  }, 3000);
-  // handleProcessComplete will be triggered by the PID monitor
+  } else {
+    killProcess(entry.pid);
+    setTimeout(() => {
+      const current = activeProcesses.get(sessionId);
+      if (current?.pid === entry.pid) killProcess(entry.pid, true);
+    }, 3000);
+  }
+  // Process exit handling or the PID monitor will complete the session cleanup.
 }
 
 // === Runtime Message Handler ===

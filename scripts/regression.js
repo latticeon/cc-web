@@ -391,6 +391,13 @@ async function main() {
     await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codexSession.sessionId);
     assert(fs.existsSync(path.join(codexInitCwd, 'AGENTS.md')), 'Codex /init should generate AGENTS.md in the workspace');
 
+    ws.send(JSON.stringify({ type: 'message', text: 'wait for abort', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'session_list' && msg.sessions.some((s) => s.id === codexSession.sessionId && s.isRunning));
+    const abortStartedAt = Date.now();
+    ws.send(JSON.stringify({ type: 'abort' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codexSession.sessionId, 2500);
+    assert(Date.now() - abortStartedAt < 2500, 'Codex abort should not wait for the old three-second force-kill fallback');
+
     ws.send(JSON.stringify({ type: 'message', text: '/model gpt-5.6-luna(low)', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
     const codexModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'gpt-5.6-luna(low)');
     assert(codexModelChanged.model === 'gpt-5.6-luna(low)', 'Codex /model should accept model names with reasoning effort');
@@ -439,9 +446,10 @@ async function main() {
 	      .split('\n')
 	      .filter((line) => line.includes(`"event":"process_spawn"`) && line.includes(firstMessageSession.sessionId.slice(0, 8)));
 	    const lastSpawn = allSpawnsForSession[allSpawnsForSession.length - 1] || '';
-	    assert(lastSpawn.includes('resume') && lastSpawn.includes(threadIdBeforeMode), 'Codex mode switch should keep resume thread id');
-	    assert(lastSpawn.includes('-s read-only'), 'Codex plan mode should set sandbox read-only');
-	    assert(lastSpawn.indexOf('-s read-only') >= 0 && lastSpawn.indexOf('-s read-only') < lastSpawn.indexOf('resume'), 'Codex resume in plan mode must place -s before resume subcommand');
+	    const lastSpawnArgs = lastSpawn ? String(JSON.parse(lastSpawn).args || '') : '';
+	    assert(lastSpawnArgs.includes('resume') && lastSpawnArgs.includes(threadIdBeforeMode), 'Codex mode switch should keep resume thread id');
+	    assert(lastSpawnArgs.includes('-s read-only'), 'Codex plan mode should set sandbox read-only');
+	    assert(lastSpawnArgs.indexOf('-s read-only') < lastSpawnArgs.indexOf('resume'), 'Codex resume in plan mode must place -s before resume subcommand');
 
     const runtimeToml = fs.readFileSync(path.join(configDir, 'codex-runtime-home', 'config.toml'), 'utf8');
     assert(runtimeToml.includes('preferred_auth_method = "apikey"'), 'Codex custom profile should write isolated runtime auth mode');

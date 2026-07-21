@@ -2346,6 +2346,7 @@ body.session-loading-active {
   color: #fff;
 }
 .abort-btn:hover { background: var(--accent-hover); }
+.abort-btn:disabled { opacity: 0.55; cursor: wait; }
 
 /* Git changes panel */
 .git-changes-btn {

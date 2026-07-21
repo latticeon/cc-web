@@ -38,6 +38,11 @@ function readStdin() {
   process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: threadId })}\n`);
   process.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`);
 
+  if (input === 'wait for abort') {
+    setInterval(() => {}, 1000);
+    return;
+  }
+
   if (/pwd/i.test(input)) {
     process.stdout.write(`${JSON.stringify({
       type: 'item.started',

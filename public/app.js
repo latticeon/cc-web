@@ -2788,6 +2788,8 @@
     activeToolCalls.clear();
     sendBtn.hidden = true;
     abortBtn.hidden = false;
+    abortBtn.disabled = false;
+    abortBtn.title = '停止';
     // 不禁用输入框，允许用户继续输入（但无法发送）
 
     const welcome = messagesDiv.querySelector('.welcome-msg');
@@ -2808,6 +2810,8 @@
     isGenerating = false;
     sendBtn.hidden = false;
     abortBtn.hidden = true;
+    abortBtn.disabled = false;
+    abortBtn.title = '停止';
     setCurrentSessionRunningState(false);
     msgInput.focus();
 
@@ -4719,7 +4723,11 @@
     }
   });
   sendBtn.addEventListener('click', sendMessage);
-  abortBtn.addEventListener('click', () => send({ type: 'abort' }));
+  abortBtn.addEventListener('click', () => {
+    abortBtn.disabled = true;
+    abortBtn.title = '正在停止';
+    send({ type: 'abort' });
+  });
   gitChangesBtn.addEventListener('click', () => setGitPanelOpen(!gitPanelOpen));
   gitCloseBtn.addEventListener('click', () => setGitPanelOpen(false));
   gitRefreshBtn.addEventListener('click', () => {
