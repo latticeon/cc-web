@@ -279,6 +279,10 @@
   let kimiConfigCache = null;
   let isSessionMultiSelectMode = false;
   let selectedSessionIds = new Set();
+  let gitPanelOpen = false;
+  let workspaceTab = 'changes';
+  let currentWorkspacePath = '';
+  let fileViewerSourceTab = 'files';
 
   // --- DOM ---
   const $ = (sel) => document.querySelector(sel);
@@ -315,6 +319,14 @@
   const chatContextText = $('#chat-context-text');
   const chatContextProgressBar = $('#chat-context-progress-bar');
   const costDisplay = $('#cost-display');
+  const gitChangesBtn = $('#git-changes-btn');
+  const gitChangesCount = $('#git-changes-count');
+  const gitPanel = $('#git-panel');
+  const gitPanelBody = $('#git-panel-body');
+  const gitBranch = $('#git-branch');
+  const gitRefreshBtn = $('#git-refresh-btn');
+  const gitCloseBtn = $('#git-close-btn');
+  const workspaceTabs = Array.from(document.querySelectorAll('[data-workspace-tab]'));
   const attachmentTray = $('#attachment-tray');
   const imageUploadInput = $('#image-upload-input');
   const attachBtn = $('#attach-btn');
@@ -325,6 +337,205 @@
   const abortBtn = $('#abort-btn');
   const cmdMenu = $('#cmd-menu');
   const modeSelect = $('#mode-select');
+
+  function requestGitStatus() {
+    if (!currentSessionId) {
+      renderGitStatus({ available: false, files: [] });
+      return;
+    }
+    gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取变更...</div>';
+    send({ type: 'get_git_status', sessionId: currentSessionId });
+  }
+
+  function requestWorkspaceFiles(relativePath = currentWorkspacePath) {
+    if (!currentSessionId) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">打开一个项目会话后浏览文件</div>';
+      return;
+    }
+    gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取文件...</div>';
+    send({ type: 'list_workspace_files', sessionId: currentSessionId, path: relativePath || '' });
+  }
+
+  function requestWorkspaceFile(filePath) {
+    fileViewerSourceTab = workspaceTab;
+    gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取文件...</div>';
+    send({ type: 'read_workspace_file', sessionId: currentSessionId, path: filePath });
+  }
+
+  function formatFileSize(size) {
+    if (!Number.isFinite(size)) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function setWorkspaceTab(tab) {
+    workspaceTab = tab === 'files' ? 'files' : 'changes';
+    workspaceTabs.forEach((button) => {
+      const active = button.dataset.workspaceTab === workspaceTab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+    });
+    if (workspaceTab === 'files') requestWorkspaceFiles();
+    else requestGitStatus();
+  }
+
+  function renderGitStatus(status) {
+    const files = Array.isArray(status?.files) ? status.files : [];
+    gitChangesCount.textContent = String(files.length);
+    gitChangesCount.hidden = files.length === 0;
+    gitBranch.textContent = status?.branch || '';
+    gitPanelBody.innerHTML = '';
+
+    if (!currentSessionId) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">打开一个项目会话后查看变更</div>';
+      return;
+    }
+    if (!status?.available) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">当前工作目录不是 Git 仓库，或暂时无法读取</div>';
+      return;
+    }
+    if (files.length === 0) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">工作区没有未提交的变更</div>';
+      return;
+    }
+
+    const labels = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R', untracked: 'U' };
+    const list = document.createElement('div');
+    list.className = 'git-change-list';
+    files.forEach((file) => {
+      const item = document.createElement('div');
+      item.className = 'git-change-item';
+      item.title = `${file.code || ''} ${file.path || ''}`.trim();
+      const badge = document.createElement('span');
+      badge.className = `git-change-status ${file.status || 'modified'}`;
+      badge.textContent = labels[file.status] || 'M';
+      const pathNode = document.createElement('span');
+      pathNode.className = 'git-change-path';
+      const normalizedPath = String(file.path || '').replace(/\\/g, '/');
+      const slashIndex = normalizedPath.lastIndexOf('/');
+      if (slashIndex >= 0) {
+        const dir = document.createElement('span');
+        dir.className = 'git-change-dir';
+        dir.textContent = normalizedPath.slice(0, slashIndex + 1);
+        pathNode.appendChild(dir);
+      }
+      pathNode.append(document.createTextNode(normalizedPath.slice(slashIndex + 1)));
+      item.append(badge, pathNode);
+      const lines = document.createElement('span');
+      lines.className = 'git-change-lines';
+      if (Number.isFinite(file.additions) && file.additions > 0) {
+        const additions = document.createElement('span');
+        additions.className = 'git-change-additions';
+        additions.textContent = `+${file.additions}`;
+        lines.appendChild(additions);
+      }
+      if (Number.isFinite(file.deletions) && file.deletions > 0) {
+        const deletions = document.createElement('span');
+        deletions.className = 'git-change-deletions';
+        deletions.textContent = `-${file.deletions}`;
+        lines.appendChild(deletions);
+      }
+      item.appendChild(lines);
+      if (file.status !== 'deleted') {
+        item.addEventListener('click', () => requestWorkspaceFile(file.path));
+      }
+      list.appendChild(item);
+    });
+    gitPanelBody.appendChild(list);
+  }
+
+  function renderWorkspaceFiles(payload) {
+    currentWorkspacePath = payload?.path || '';
+    gitPanelBody.innerHTML = '';
+    if (!payload?.available) {
+      gitPanelBody.innerHTML = `<div class="git-panel-empty">${escapeHtml(payload?.error || '无法读取当前目录')}</div>`;
+      return;
+    }
+    const toolbar = document.createElement('div');
+    toolbar.className = 'workspace-browser-toolbar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'workspace-back-btn';
+    back.title = '返回上级目录';
+    back.textContent = '‹';
+    back.disabled = !currentWorkspacePath;
+    back.addEventListener('click', () => {
+      const parts = currentWorkspacePath.split('/').filter(Boolean);
+      parts.pop();
+      requestWorkspaceFiles(parts.join('/'));
+    });
+    const pathLabel = document.createElement('span');
+    pathLabel.className = 'workspace-path';
+    pathLabel.textContent = currentWorkspacePath || '项目根目录';
+    toolbar.append(back, pathLabel);
+    gitPanelBody.appendChild(toolbar);
+
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    if (entries.length === 0) {
+      gitPanelBody.insertAdjacentHTML('beforeend', '<div class="git-panel-empty">此文件夹为空</div>');
+      return;
+    }
+    entries.forEach((entry) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'workspace-entry';
+      row.title = entry.path;
+      const icon = document.createElement('span');
+      icon.className = 'workspace-entry-icon';
+      icon.textContent = entry.directory ? '▸' : '·';
+      const name = document.createElement('span');
+      name.className = 'workspace-entry-name';
+      name.textContent = entry.name;
+      const size = document.createElement('span');
+      size.className = 'workspace-entry-size';
+      size.textContent = entry.directory ? '' : formatFileSize(entry.size);
+      row.append(icon, name, size);
+      row.addEventListener('click', () => {
+        if (entry.directory) requestWorkspaceFiles(entry.path);
+        else requestWorkspaceFile(entry.path);
+      });
+      gitPanelBody.appendChild(row);
+    });
+  }
+
+  function renderWorkspaceFile(payload) {
+    gitPanelBody.innerHTML = '';
+    if (!payload?.available) {
+      gitPanelBody.innerHTML = `<div class="git-panel-empty">${escapeHtml(payload?.error || '无法预览此文件')}</div>`;
+      return;
+    }
+    const viewer = document.createElement('div');
+    viewer.className = 'workspace-file-viewer';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'workspace-browser-toolbar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'workspace-back-btn';
+    back.title = '返回文件列表';
+    back.textContent = '‹';
+    back.addEventListener('click', () => {
+      if (fileViewerSourceTab === 'changes') requestGitStatus();
+      else requestWorkspaceFiles(currentWorkspacePath);
+    });
+    const pathLabel = document.createElement('span');
+    pathLabel.className = 'workspace-path';
+    pathLabel.textContent = payload.path;
+    toolbar.append(back, pathLabel);
+    const content = document.createElement('pre');
+    content.className = 'workspace-file-content';
+    content.textContent = payload.content || '';
+    viewer.append(toolbar, content);
+    gitPanelBody.appendChild(viewer);
+  }
+
+  function setGitPanelOpen(open) {
+    gitPanelOpen = !!open;
+    gitPanel.hidden = !gitPanelOpen;
+    gitChangesBtn.classList.toggle('active', gitPanelOpen);
+    gitChangesBtn.setAttribute('aria-expanded', String(gitPanelOpen));
+    if (gitPanelOpen) setWorkspaceTab(workspaceTab);
+  }
 
   // --- Viewport height fix for mobile browsers ---
   function setVH() {
@@ -1362,7 +1573,7 @@
       chatCwd.classList.remove('expanded');
     }
     chatCwd.hidden = !currentCwd;
-    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && !showCodebuddyProfile && (!chatContextRow || chatContextRow.hidden);
+    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && !showCodebuddyProfile;
     if (chatRuntimeState) chatRuntimeState.hidden = !currentSessionRunning;
   }
 
@@ -1648,7 +1859,17 @@
         value: next.value,
         label: next.label,
         desc: next.desc,
+        group: '',
       };
+      if (normalizedAgent === 'opencode') {
+        const separatorIndex = entry.value.indexOf('/');
+        if (separatorIndex > 0 && separatorIndex < entry.value.length - 1) {
+          entry.group = entry.value.slice(0, separatorIndex);
+          if (entry.label === entry.value) entry.label = entry.value.slice(separatorIndex + 1);
+        } else {
+          entry.group = '其他';
+        }
+      }
       items.push(entry);
       itemMap.set(entry.value, entry);
     }
@@ -1667,6 +1888,9 @@
       upsertOption(model, modelControl?.sourceLabel || '可用模型', true);
     });
 
+    if (normalizedAgent === 'opencode') {
+      items.sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label));
+    }
     return items;
   }
 
@@ -1728,6 +1952,17 @@
     });
   }
 
+  function formatModelDisplayName(modelName, agent = currentAgent) {
+    let value = String(modelName || '').trim().replace(/^\*{1,2}|\*{1,2}$/g, '');
+    if (normalizeAgent(agent) === 'opencode') {
+      const separatorIndex = value.indexOf('/');
+      if (separatorIndex >= 0 && separatorIndex < value.length - 1) {
+        value = value.slice(separatorIndex + 1);
+      }
+    }
+    return value;
+  }
+
   function updateModelControls() {
     if (!modelPickerBtn || !thinkingPickerBtn) return;
     const hasSession = !!currentSessionId;
@@ -1763,12 +1998,13 @@
     }
 
     if (modelControl?.kind === 'dynamic') {
-      const currentLabel = String(currentModel || '').trim() || modelControl.emptyLabel || '选择模型';
+      const fullModelName = String(currentModel || '').trim();
+      const currentLabel = formatModelDisplayName(fullModelName, currentAgent) || modelControl.emptyLabel || '选择模型';
       modelPickerBtn.hidden = false;
       modelPickerBtn.disabled = !hasSession;
       modelPickerBtn.textContent = currentLabel;
       modelPickerBtn.title = hasSession
-        ? `当前 ${agentSpec?.label || 'Agent'} 模型: ${String(currentModel || '').trim() || '配置默认模型'}`
+        ? `当前 ${agentSpec?.label || 'Agent'} 模型: ${fullModelName || '配置默认模型'}`
         : `请先打开或创建一个 ${agentSpec?.label || 'Agent'} 会话`;
       thinkingPickerBtn.hidden = true;
       thinkingPickerBtn.disabled = true;
@@ -1827,6 +2063,7 @@
     setCurrentSessionRunningState(false);
     currentCwd = null;
     currentCwdExpanded = false;
+    currentWorkspacePath = '';
     currentSessionMessages = [];
     currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
     isGenerating = false;
@@ -1838,6 +2075,7 @@
     abortBtn.hidden = true;
     chatTitle.textContent = '新会话';
     updateCwdBadge();
+    renderGitStatus({ available: false, files: [] });
     messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
     setStatsDisplay(null);
     updateContextUsageDisplay();
@@ -1869,7 +2107,9 @@
     currentSessionMessages = cloneMessages(snapshot.messages || []);
     currentCwd = snapshot.cwd || null;
     currentCwdExpanded = false;
+    currentWorkspacePath = '';
     updateCwdBadge();
+    if (gitPanelOpen) setWorkspaceTab(workspaceTab);
     if (snapshot.mode && MODE_LABELS[snapshot.mode]) {
       currentMode = snapshot.mode;
       modeSelect.value = currentMode;
@@ -2189,11 +2429,13 @@
     switch (msg.type) {
       case 'auth_result':
         if (msg.success) {
+          const firstAppReveal = app.hidden;
           authToken = msg.token;
           localStorage.setItem('cc-web-token', msg.token);
           document.dispatchEvent(new CustomEvent('cc-web-auth-restored'));
           loginOverlay.hidden = true;
           app.hidden = false;
+          if (firstAppReveal && window.matchMedia('(min-width: 769px)').matches) setGitPanelOpen(true);
           send({ type: 'get_codex_config' });
           // Check if must change password
           if (msg.mustChangePassword) {
@@ -2323,6 +2565,19 @@
 
       case 'done':
         finishGenerating(msg.sessionId);
+        if (gitPanelOpen) setWorkspaceTab(workspaceTab);
+        break;
+
+      case 'git_status':
+        if (!msg.sessionId || msg.sessionId === currentSessionId) renderGitStatus(msg);
+        break;
+
+      case 'workspace_files':
+        if (msg.sessionId === currentSessionId) renderWorkspaceFiles(msg);
+        break;
+
+      case 'workspace_file':
+        if (msg.sessionId === currentSessionId) renderWorkspaceFile(msg);
         break;
 
       case 'system_message':
@@ -4070,18 +4325,33 @@
     picker.className = 'option-picker';
     picker.id = 'option-picker';
 
+    const renderOption = (opt) => `
+      <div class="option-picker-item${opt.value === currentValue ? ' active' : ''}" data-value="${escapeHtml(opt.value)}">
+        <div class="option-picker-item-info">
+          <div class="option-picker-item-label">${escapeHtml(opt.label)}</div>
+          <div class="option-picker-item-desc">${escapeHtml(opt.desc)}</div>
+        </div>
+        ${opt.value === currentValue ? '<span class="option-picker-item-check">✓</span>' : ''}
+      </div>`;
+    const groups = new Map();
+    options.forEach((option) => {
+      const group = String(option.group || '');
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(option);
+    });
+    const hasGroups = Array.from(groups.keys()).some(Boolean);
+    const optionMarkup = hasGroups
+      ? Array.from(groups.entries()).map(([group, groupOptions]) => `
+          <section class="option-picker-group">
+            <div class="option-picker-group-title">${escapeHtml(group || '其他')}</div>
+            ${groupOptions.map(renderOption).join('')}
+          </section>`).join('')
+      : options.map(renderOption).join('');
+
     picker.innerHTML = `
       <div class="option-picker-title">${escapeHtml(title)}</div>
       <div class="option-picker-list">
-        ${options.map(opt => `
-          <div class="option-picker-item${opt.value === currentValue ? ' active' : ''}" data-value="${opt.value}">
-            <div class="option-picker-item-info">
-              <div class="option-picker-item-label">${escapeHtml(opt.label)}</div>
-              <div class="option-picker-item-desc">${escapeHtml(opt.desc)}</div>
-            </div>
-            ${opt.value === currentValue ? '<span class="option-picker-item-check">✓</span>' : ''}
-          </div>
-        `).join('')}
+        ${optionMarkup}
       </div>
     `;
     overlay.appendChild(picker);
@@ -4392,6 +4662,15 @@
   });
   sendBtn.addEventListener('click', sendMessage);
   abortBtn.addEventListener('click', () => send({ type: 'abort' }));
+  gitChangesBtn.addEventListener('click', () => setGitPanelOpen(!gitPanelOpen));
+  gitCloseBtn.addEventListener('click', () => setGitPanelOpen(false));
+  gitRefreshBtn.addEventListener('click', () => {
+    if (workspaceTab === 'files') requestWorkspaceFiles();
+    else requestGitStatus();
+  });
+  workspaceTabs.forEach((button) => {
+    button.addEventListener('click', () => setWorkspaceTab(button.dataset.workspaceTab));
+  });
   if (attachBtn && imageUploadInput) {
     attachBtn.addEventListener('click', () => imageUploadInput.click());
     imageUploadInput.addEventListener('change', () => {

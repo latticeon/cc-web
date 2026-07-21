@@ -1757,6 +1757,160 @@ function mergeAssistantMessage(target, incoming) {
   return changed;
 }
 
+function getLocalSessionWorkspace(sessionId) {
+  const session = sessionId ? loadSession(sessionId) : null;
+  const cwd = session?.cwd || activeProcesses.get(sessionId)?.cwd || '';
+  if (!session || !cwd || session.taskMode === 'remote' || !fs.existsSync(cwd)) return null;
+  return { session, cwd: path.resolve(cwd) };
+}
+
+function handleGitStatus(ws, sessionId) {
+  const workspace = getLocalSessionWorkspace(sessionId);
+  if (!workspace) {
+    return wsSend(ws, { type: 'git_status', sessionId, available: false, files: [] });
+  }
+  const { cwd } = workspace;
+
+  try {
+    const branchResult = spawnSync('git', ['branch', '--show-current'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    const statusResult = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (statusResult.status !== 0) {
+      return wsSend(ws, { type: 'git_status', sessionId, available: false, files: [] });
+    }
+
+    const numstatResult = spawnSync('git', ['diff', '--numstat', 'HEAD', '--'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    const lineStats = new Map();
+    String(numstatResult.stdout || '').split(/\r?\n/).forEach((line) => {
+      const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+      if (!match) return;
+      lineStats.set(match[3], {
+        additions: match[1] === '-' ? null : Number(match[1]),
+        deletions: match[2] === '-' ? null : Number(match[2]),
+      });
+    });
+
+    const entries = String(statusResult.stdout || '').split('\0').filter(Boolean);
+    const files = [];
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const code = entry.slice(0, 2);
+      const filePath = entry.slice(3);
+      const renamed = code.includes('R') || code.includes('C');
+      const originalPath = renamed ? entries[++index] || '' : '';
+      let status = 'modified';
+      if (code === '??') status = 'untracked';
+      else if (code.includes('D')) status = 'deleted';
+      else if (code.includes('A')) status = 'added';
+      else if (renamed) status = 'renamed';
+      let stats = lineStats.get(filePath) || {};
+      if (status === 'untracked') {
+        try {
+          const target = path.resolve(cwd, filePath);
+          const fileStat = fs.statSync(target);
+          if (fileStat.isFile() && fileStat.size <= 2 * 1024 * 1024) {
+            const content = fs.readFileSync(target, 'utf8');
+            stats = { additions: content ? content.split(/\r?\n/).length : 0, deletions: 0 };
+          }
+        } catch {}
+      }
+      files.push({
+        path: filePath,
+        originalPath,
+        code,
+        status,
+        staged: code[0] !== ' ' && code[0] !== '?',
+        additions: Number.isFinite(stats.additions) ? stats.additions : null,
+        deletions: Number.isFinite(stats.deletions) ? stats.deletions : null,
+      });
+    }
+    wsSend(ws, {
+      type: 'git_status',
+      sessionId,
+      available: true,
+      branch: String(branchResult.stdout || '').trim(),
+      files,
+    });
+  } catch (error) {
+    wsSend(ws, { type: 'git_status', sessionId, available: false, files: [], error: error.message });
+  }
+}
+
+function handleListWorkspaceFiles(ws, sessionId, relativePath = '') {
+  const workspace = getLocalSessionWorkspace(sessionId);
+  if (!workspace) return wsSend(ws, { type: 'workspace_files', sessionId, available: false, entries: [] });
+  const target = path.resolve(workspace.cwd, String(relativePath || ''));
+  if (!isPathInside(workspace.cwd, target)) {
+    return wsSend(ws, { type: 'workspace_files', sessionId, available: false, entries: [], error: '路径越界' });
+  }
+  try {
+    const entries = fs.readdirSync(target, { withFileTypes: true })
+      .filter((entry) => entry.name !== '.git')
+      .map((entry) => {
+        const fullPath = path.join(target, entry.name);
+        const stat = fs.statSync(fullPath);
+        return {
+          name: entry.name,
+          path: path.relative(workspace.cwd, fullPath).replace(/\\/g, '/'),
+          directory: entry.isDirectory(),
+          size: entry.isFile() ? stat.size : null,
+        };
+      })
+      .sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name, 'zh-CN'))
+      .slice(0, 500);
+    wsSend(ws, {
+      type: 'workspace_files',
+      sessionId,
+      available: true,
+      path: path.relative(workspace.cwd, target).replace(/\\/g, '/'),
+      entries,
+    });
+  } catch (error) {
+    wsSend(ws, { type: 'workspace_files', sessionId, available: false, entries: [], error: error.message });
+  }
+}
+
+function handleReadWorkspaceFile(ws, sessionId, relativePath) {
+  const workspace = getLocalSessionWorkspace(sessionId);
+  if (!workspace) return wsSend(ws, { type: 'workspace_file', sessionId, available: false });
+  const target = path.resolve(workspace.cwd, String(relativePath || ''));
+  if (!isPathInside(workspace.cwd, target)) {
+    return wsSend(ws, { type: 'workspace_file', sessionId, available: false, error: '路径越界' });
+  }
+  try {
+    const stat = fs.statSync(target);
+    if (!stat.isFile()) throw new Error('目标不是文件');
+    if (stat.size > 1024 * 1024) throw new Error('文件超过 1MB，无法预览');
+    const buffer = fs.readFileSync(target);
+    if (buffer.includes(0)) throw new Error('二进制文件无法预览');
+    wsSend(ws, {
+      type: 'workspace_file',
+      sessionId,
+      available: true,
+      path: path.relative(workspace.cwd, target).replace(/\\/g, '/'),
+      content: buffer.toString('utf8'),
+    });
+  } catch (error) {
+    wsSend(ws, { type: 'workspace_file', sessionId, available: false, path: relativePath, error: error.message });
+  }
+}
+
 function mergeSequentialAssistantMessage(target, incoming) {
   const targetContent = normalizeAssistantContent(target.content);
   const incomingContent = normalizeAssistantContent(incoming.content);
@@ -3221,6 +3375,15 @@ wss.on('connection', (ws, req) => {
         break;
       case 'list_sessions':
         sendSessionList(ws);
+        break;
+      case 'get_git_status':
+        handleGitStatus(ws, msg.sessionId);
+        break;
+      case 'list_workspace_files':
+        handleListWorkspaceFiles(ws, msg.sessionId, msg.path);
+        break;
+      case 'read_workspace_file':
+        handleReadWorkspaceFile(ws, msg.sessionId, msg.path);
         break;
       case 'detach_view':
         handleDetachView(ws);
