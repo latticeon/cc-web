@@ -2855,7 +2855,7 @@
   }
 
   function renderMarkdown(text) {
-    if (!text) return '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+    if (!text) return '<div class="typing-indicator" data-text="正在思考" role="status">正在思考</div>';
     try { return marked.parse(text); }
     catch { return escapeHtml(text); }
   }
