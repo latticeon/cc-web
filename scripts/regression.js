@@ -391,9 +391,9 @@ async function main() {
     await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codexSession.sessionId);
     assert(fs.existsSync(path.join(codexInitCwd, 'AGENTS.md')), 'Codex /init should generate AGENTS.md in the workspace');
 
-    ws.send(JSON.stringify({ type: 'message', text: '/model gpt-5.3-codex', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
-    const codexModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'gpt-5.3-codex');
-    assert(codexModelChanged.model === 'gpt-5.3-codex', 'Codex /model should accept arbitrary Codex model names');
+    ws.send(JSON.stringify({ type: 'message', text: '/model gpt-5.6-luna(low)', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
+    const codexModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'gpt-5.6-luna(low)');
+    assert(codexModelChanged.model === 'gpt-5.6-luna(low)', 'Codex /model should accept model names with reasoning effort');
 
     const codexAttachment = await uploadAttachment(port, token, {
       filename: 'codex-test.png',
@@ -429,6 +429,10 @@ async function main() {
       .split('\n')
       .find((line) => line.includes(`"event":"process_spawn"`) && line.includes(firstMessageSession.sessionId.slice(0, 8)));
     assert(spawnLine && !spawnLine.includes('--search') && spawnLine.includes('--image'), 'Codex exec should attach images and not append unsupported --search flag');
+    const spawnEntry = JSON.parse(spawnLine);
+    assert(spawnEntry.args.includes('--model gpt-5.6-luna'), 'Codex exec should pass the base model without reasoning suffix');
+    assert(!spawnEntry.args.includes('--model "gpt-5.6-luna(low)"') && !spawnEntry.args.includes("--model 'gpt-5.6-luna(low)'"), 'Codex exec should not pass reasoning effort as part of the model name');
+    assert(spawnEntry.args.includes('model_reasoning_effort=low'), 'Codex exec should pass low reasoning effort as a quote-free config override');
 
 	    const allSpawnsForSession = processLog
 	      .trim()
@@ -437,11 +441,14 @@ async function main() {
 	    const lastSpawn = allSpawnsForSession[allSpawnsForSession.length - 1] || '';
 	    assert(lastSpawn.includes('resume') && lastSpawn.includes(threadIdBeforeMode), 'Codex mode switch should keep resume thread id');
 	    assert(lastSpawn.includes('-s read-only'), 'Codex plan mode should set sandbox read-only');
-	    assert(lastSpawn.includes('-s read-only resume'), 'Codex resume in plan mode must place -s before resume subcommand');
+	    assert(lastSpawn.indexOf('-s read-only') >= 0 && lastSpawn.indexOf('-s read-only') < lastSpawn.indexOf('resume'), 'Codex resume in plan mode must place -s before resume subcommand');
 
     const runtimeToml = fs.readFileSync(path.join(configDir, 'codex-runtime-home', 'config.toml'), 'utf8');
     assert(runtimeToml.includes('preferred_auth_method = "apikey"'), 'Codex custom profile should write isolated runtime auth mode');
     assert(runtimeToml.includes('base_url = "https://example.com/v1"'), 'Codex custom profile should write isolated runtime base_url');
+
+    ws.send(JSON.stringify({ type: 'message', text: '/model gpt-5.3-codex', sessionId: firstMessageSession.sessionId, mode: 'plan', agent: 'codex' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'gpt-5.3-codex');
 
     ws.send(JSON.stringify({ type: 'message', text: '/compact', sessionId: firstMessageSession.sessionId, mode: 'yolo', agent: 'codex' }));
     await nextMessage(messages, ws, (msg) => msg.type === 'system_message' && /正在执行/.test(msg.message || '') && /Codex \/compact/.test(msg.message || ''));
