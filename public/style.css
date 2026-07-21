@@ -2550,21 +2550,22 @@ body.session-loading-active {
   inset: 0;
   z-index: 500;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
   padding: 16px;
-  padding-bottom: calc(96px + var(--safe-bottom));
-  background: rgba(45, 31, 20, 0.08);
+  padding-bottom: calc(16px + var(--safe-bottom));
+  background: rgba(20, 16, 12, 0.24);
+  backdrop-filter: blur(4px);
 }
 .option-picker {
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface-strong);
   border: 1px solid var(--border-color);
-  border-radius: 14px;
-  box-shadow: 0 8px 32px rgba(45, 31, 20, 0.15);
-  padding: 16px;
-  width: min(380px, calc(100vw - 32px));
+  border-radius: 20px;
+  box-shadow: 0 22px 60px rgba(45, 31, 20, 0.24);
+  padding: 18px;
+  width: min(460px, calc(100vw - 32px));
   min-width: 280px;
   max-height: min(70vh, calc(100dvh - 140px));
   min-height: 0;
@@ -2574,8 +2575,8 @@ body.session-loading-active {
 }
 .option-picker-title {
   flex-shrink: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
   color: var(--text-primary);
   margin-bottom: 12px;
   padding: 0 4px;
@@ -2586,23 +2587,28 @@ body.session-loading-active {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding-right: 2px;
+  padding-right: 4px;
 }
 .option-picker-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
-  border-radius: 10px;
+  padding: 11px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 58%, transparent);
   cursor: pointer;
   transition: background 0.12s;
   margin-bottom: 4px;
 }
 .option-picker-item:last-child { margin-bottom: 0; }
-.option-picker-item:hover { background: var(--accent-light); }
+.option-picker-item:hover {
+  border-color: var(--border-color);
+  background: var(--bg-secondary);
+}
 .option-picker-item.active {
   background: var(--accent-light);
-  outline: 1px solid var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-color));
 }
 .option-picker-item-info { flex: 1; min-width: 0; }
 .option-picker-item-label {
@@ -2637,6 +2643,143 @@ body.session-loading-active {
   font-weight: 700;
   text-transform: none;
 }
+.option-picker-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.option-picker-header .option-picker-title { margin: 0; }
+.option-picker-subtitle {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.option-picker-close {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 20px;
+}
+.option-picker-close:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.option-picker-combined { width: min(560px, calc(100vw - 32px)); }
+.option-picker-config-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+.option-picker-config-section + .option-picker-config-section { margin-top: 18px; }
+.option-picker-section-title {
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+.option-picker-model-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.option-picker-choice {
+  position: relative;
+  min-width: 0;
+  min-height: 66px;
+  padding: 11px 34px 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 54%, transparent);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.option-picker-choice:hover { background: var(--bg-secondary); }
+.option-picker-choice.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+.option-picker-choice-label,
+.option-picker-choice-desc { display: block; }
+.option-picker-choice-label {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.option-picker-choice-desc {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.option-picker-choice-mark {
+  position: absolute;
+  top: 10px;
+  right: 11px;
+  color: var(--accent);
+  opacity: 0;
+}
+.option-picker-choice.active .option-picker-choice-mark { opacity: 1; }
+.option-picker-effort-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.option-picker-effort {
+  min-width: 0;
+  padding: 9px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+.option-picker-effort small {
+  display: none;
+}
+.option-picker-effort:hover { background: var(--bg-secondary); }
+.option-picker-effort.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 700;
+}
+.option-picker-footer {
+  flex: 0 0 auto;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.option-picker-cancel,
+.option-picker-confirm {
+  min-width: 72px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+.option-picker-cancel {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.option-picker-confirm {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
 
 /* === Click Tip === */
 .click-tip {
@@ -2661,6 +2804,14 @@ body.session-loading-active {
   border-left: 1px solid var(--border-color);
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
+}
+.click-tip.is-above .click-tip-arrow {
+  top: auto;
+  bottom: -6px;
+  border-top: 0;
+  border-left: 0;
+  border-right: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
 }
 .click-tip-title {
   font-size: 12px;

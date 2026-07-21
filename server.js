@@ -220,6 +220,7 @@ const MODEL_CONFIG_PATH = path.join(CONFIG_DIR, 'model.json');
 const CODEX_CONFIG_PATH = path.join(CONFIG_DIR, 'codex.json');
 const CODEBUDDY_CONFIG_PATH = path.join(CONFIG_DIR, 'codebuddy.json');
 const KIMI_CONFIG_PATH = path.join(CONFIG_DIR, 'kimi.json');
+const AGENT_MODEL_PREFERENCES_PATH = path.join(CONFIG_DIR, 'agent-models.json');
 const BANNED_IPS_PATH = path.join(CONFIG_DIR, 'banned_ips.json');
 
 fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -794,6 +795,8 @@ function usesAgentsMarkdown(agent) {
 }
 
 function resolveAgentDefaultSessionModel(agent) {
+  const rememberedModel = getRememberedAgentModel(agent);
+  if (rememberedModel) return rememberedModel;
   const spec = getAgentConfig(agent).defaults?.defaultSessionModel || null;
   if (normalizeAgent(agent) === 'opencode') {
     return resolveOpencodeDefaultModel();
@@ -941,6 +944,39 @@ function sanitizeCodebuddyProfile(rawProfile) {
     authToken: String(rawProfile?.authToken || ''),
     apiKey: String(rawProfile?.apiKey || ''),
   };
+}
+
+function loadAgentModelPreferences() {
+  try {
+    const value = JSON.parse(fs.readFileSync(AGENT_MODEL_PREFERENCES_PATH, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function getRememberedAgentModel(agent) {
+  const model = loadAgentModelPreferences()[normalizeAgent(agent)];
+  return typeof model === 'string' ? model.trim() : '';
+}
+
+function rememberAgentModel(agent, model) {
+  const normalizedAgent = normalizeAgent(agent);
+  const normalizedModel = String(model || '').trim();
+  if (!normalizedModel) return;
+  const preferences = loadAgentModelPreferences();
+  preferences[normalizedAgent] = normalizedModel;
+  fs.writeFileSync(AGENT_MODEL_PREFERENCES_PATH, JSON.stringify(preferences, null, 2));
+
+  for (const file of fs.readdirSync(SESSIONS_DIR).filter((entry) => entry.endsWith('.json'))) {
+    try {
+      const filePath = path.join(SESSIONS_DIR, file);
+      const session = normalizeSession(JSON.parse(fs.readFileSync(filePath, 'utf8')));
+      if (getSessionAgent(session) !== normalizedAgent || session.model === normalizedModel) continue;
+      session.model = normalizedModel;
+      fs.writeFileSync(filePath, JSON.stringify(session, null, 2));
+    } catch {}
+  }
 }
 
 function normalizeKimiCapabilityList(rawList) {
@@ -1721,7 +1757,10 @@ function clearRuntimeSessionId(session) {
 
 function loadSession(id) {
   try {
-    return normalizeSession(JSON.parse(fs.readFileSync(sessionPath(id), 'utf8')));
+    const session = normalizeSession(JSON.parse(fs.readFileSync(sessionPath(id), 'utf8')));
+    const rememberedModel = getRememberedAgentModel(getSessionAgent(session));
+    if (rememberedModel) session.model = rememberedModel;
+    return session;
   } catch {
     return null;
   }
@@ -4090,6 +4129,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
           const current = session?.model || '配置默认模型';
           wsSend(ws, { type: 'system_message', message: `当前 ${agentLabel} 模型: ${current}\n用法: /model <模型名>` });
         } else {
+          rememberAgentModel(agent, modelInput);
           if (session) {
             session.model = modelInput;
             session.updated = new Date().toISOString();
@@ -4107,6 +4147,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
           wsSend(ws, { type: 'system_message', message: `无效模型: ${modelInput}\n可选: opus, sonnet, haiku` });
         } else {
           const model = MODEL_MAP[modelKey];
+          rememberAgentModel(agent, model);
           if (session) {
             session.model = model;
             session.updated = new Date().toISOString();

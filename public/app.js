@@ -2598,8 +2598,12 @@
       case 'model_changed':
         if (msg.model) {
           currentModel = msg.model;
-          if (currentSessionId) {
-            updateCachedSession(currentSessionId, (snapshot) => { snapshot.model = msg.model; });
+          sessions = sessions.map((session) =>
+            normalizeAgent(session.agent) === currentAgent ? { ...session, model: msg.model } : session
+          );
+          for (const [sessionId, entry] of sessionCache) {
+            if (normalizeAgent(entry.snapshot?.agent) !== currentAgent) continue;
+            updateCachedSession(sessionId, (snapshot) => { snapshot.model = msg.model; });
           }
         }
         updateModelControls();
@@ -4412,14 +4416,22 @@
   function positionClickTip(tip, arrow, anchor) {
     const rect = anchor.getBoundingClientRect();
     const margin = 10;
+    const gap = 10;
     const tipRect = tip.getBoundingClientRect();
-    const top = rect.bottom + 10;
+    const availableBelow = window.innerHeight - rect.bottom - margin;
+    const availableAbove = rect.top - margin;
+    const showAbove = availableBelow < tipRect.height + gap && availableAbove > availableBelow;
+    const preferredTop = showAbove
+      ? rect.top - tipRect.height - gap
+      : rect.bottom + gap;
+    const top = Math.max(margin, Math.min(preferredTop, window.innerHeight - tipRect.height - margin));
     let left = rect.left + rect.width / 2 - tipRect.width / 2;
     left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+    tip.classList.toggle('is-above', showAbove);
     tip.style.left = `${Math.round(left)}px`;
-    tip.style.top = `${Math.round(Math.min(top, window.innerHeight - tipRect.height - margin))}px`;
-    const arrowLeft = rect.left + rect.width / 2 - left - 6;
-    arrow.style.left = `${Math.round(Math.max(12, Math.min(arrowLeft, tipRect.width - 24)))}px`;
+    tip.style.top = `${Math.round(top)}px`;
+    const arrowLeft = rect.left + rect.width / 2 - left - 5;
+    arrow.style.left = `${Math.round(Math.max(10, Math.min(arrowLeft, tipRect.width - 20)))}px`;
   }
 
   function showClickTip(anchor, { title = '', body = '' } = {}) {
@@ -4461,16 +4473,7 @@
 	      return;
 	    }
 	    if (modelControl.kind === 'reasoning') {
-	      const current = _splitCodexThinkingModel(currentModel || '');
-	      const baseOptions = getCodexBaseModelOptions();
-	      showOptionPicker(modelControl.title || '选择模型', baseOptions, current.base || '', (baseValue) => {
-	        const base = String(baseValue || '').trim();
-	        showOptionPicker(modelControl.secondaryTitle || '选择 Thinking 强度', modelControl.thinkingOptions || [], current.level || '', (lvl) => {
-	          const level = String(lvl || '').trim().toLowerCase();
-	          const full = level ? `${base}(${level})` : base;
-	          send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
-	        });
-	      });
+	      showCodexCombinedPicker();
 	      return;
 	    }
 	    showOptionPicker(modelControl.title || '选择模型', modelControl.options || [], currentModel, (value) => {
@@ -4486,29 +4489,6 @@
       if (currentSessionId) {
         send({ type: 'set_mode', sessionId: currentSessionId, mode: currentMode });
       }
-    });
-  }
-
-  function showCodexModelControlPicker() {
-    const modelControl = getAgentModelControl(currentAgent);
-    if (modelControl?.kind !== 'reasoning' || !currentSessionId) return;
-    const current = getCurrentCodexModelState();
-    const baseOptions = getCodexBaseModelOptions();
-    showOptionPicker(modelControl.title || '选择模型', baseOptions, current.base, (baseValue) => {
-      const base = String(baseValue || '').trim();
-      const full = current.level ? `${base}(${current.level})` : base;
-      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
-    });
-  }
-
-  function showCodexThinkingPicker() {
-    const modelControl = getAgentModelControl(currentAgent);
-    if (modelControl?.kind !== 'reasoning' || !currentSessionId) return;
-    const current = getCurrentCodexModelState();
-    showOptionPicker(modelControl.secondaryTitle || '选择 Thinking 强度', modelControl.thinkingOptions || [], current.level, (lvl) => {
-      const level = String(lvl || '').trim().toLowerCase();
-      const full = level ? `${current.base}(${level})` : current.base;
-      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
     });
   }
 
@@ -4607,7 +4587,7 @@
     modelPickerBtn.addEventListener('click', () => {
       if (!currentSessionId) return;
       if (getAgentModelControl(currentAgent)?.kind === 'reasoning') {
-        showCodexModelControlPicker();
+        showCodexCombinedPicker();
         return;
       }
       showModelPicker();
@@ -4617,8 +4597,86 @@
   if (thinkingPickerBtn) {
     thinkingPickerBtn.addEventListener('click', () => {
       if (!currentSessionId || getAgentModelControl(currentAgent)?.kind !== 'reasoning') return;
-      showCodexThinkingPicker();
+      showCodexCombinedPicker();
     });
+  }
+
+  function showCodexCombinedPicker() {
+    const modelControl = getAgentModelControl(currentAgent);
+    if (modelControl?.kind !== 'reasoning' || !currentSessionId) return;
+    hideOptionPicker();
+
+    const current = getCurrentCodexModelState();
+    const baseOptions = getCodexBaseModelOptions();
+    const thinkingOptions = modelControl.thinkingOptions || [];
+    let selectedBase = current.base;
+    let selectedLevel = current.level;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'option-picker-overlay';
+    overlay.id = 'option-picker-overlay';
+    const picker = document.createElement('div');
+    picker.className = 'option-picker option-picker-combined';
+    picker.id = 'option-picker';
+    picker.innerHTML = `
+      <header class="option-picker-header">
+        <div>
+          <div class="option-picker-title">模型与思考强度</div>
+          <div class="option-picker-subtitle">为当前会话选择模型配置</div>
+        </div>
+        <button class="option-picker-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="option-picker-config-body">
+        <section class="option-picker-config-section">
+          <div class="option-picker-section-title">模型</div>
+          <div class="option-picker-model-grid">
+            ${baseOptions.map((option) => `
+              <button class="option-picker-choice${option.value === selectedBase ? ' active' : ''}" type="button" data-model-value="${escapeHtml(option.value)}">
+                <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
+                <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
+                <span class="option-picker-choice-mark">✓</span>
+              </button>`).join('')}
+          </div>
+        </section>
+        <section class="option-picker-config-section">
+          <div class="option-picker-section-title">思考强度</div>
+          <div class="option-picker-effort-grid">
+            ${thinkingOptions.map((option) => `
+              <button class="option-picker-effort${option.value === selectedLevel ? ' active' : ''}" type="button" data-thinking-value="${escapeHtml(option.value)}">
+                <span>${escapeHtml(option.label)}</span>
+                <small>${escapeHtml(option.desc || '')}</small>
+              </button>`).join('')}
+          </div>
+        </section>
+      </div>
+      <footer class="option-picker-footer">
+        <button class="option-picker-cancel" type="button">取消</button>
+        <button class="option-picker-confirm" type="button">应用</button>
+      </footer>`;
+    overlay.appendChild(picker);
+    document.body.appendChild(overlay);
+
+    picker.querySelectorAll('[data-model-value]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedBase = button.dataset.modelValue;
+        picker.querySelectorAll('[data-model-value]').forEach((item) => item.classList.toggle('active', item === button));
+      });
+    });
+    picker.querySelectorAll('[data-thinking-value]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedLevel = button.dataset.thinkingValue;
+        picker.querySelectorAll('[data-thinking-value]').forEach((item) => item.classList.toggle('active', item === button));
+      });
+    });
+    picker.querySelector('.option-picker-close').addEventListener('click', hideOptionPicker);
+    picker.querySelector('.option-picker-cancel').addEventListener('click', hideOptionPicker);
+    picker.querySelector('.option-picker-confirm').addEventListener('click', () => {
+      const full = selectedLevel ? `${selectedBase}(${selectedLevel})` : selectedBase;
+      hideOptionPicker();
+      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
+    });
+    overlay.addEventListener('click', _pickerOutsideClick);
+    document.addEventListener('keydown', _pickerEscape);
   }
 
   if (chatCwd) {
@@ -6999,9 +7057,19 @@
   }
 
   function showNewSessionModal() {
+    const agentOrder = ['codex', 'opencode', 'codebuddy', 'kimi', 'claude'];
+    const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
+      const aIndex = agentOrder.indexOf(a.id);
+      const bIndex = agentOrder.indexOf(b.id);
+      return (aIndex < 0 ? agentOrder.length : aIndex) - (bIndex < 0 ? agentOrder.length : bIndex);
+    });
+    const getNewSessionAgentLabel = (agentId) => {
+      if (agentId === 'claude') return 'Claude Code';
+      return getAgentDefinition(agentId)?.label || 'Agent';
+    };
     let selectedAgent = normalizeAgent(currentAgent);
     let selectedCodebuddyProfile = '';
-    const initialLabel = getAgentDefinition(selectedAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
+    const initialLabel = getNewSessionAgentLabel(selectedAgent);
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.id = 'new-session-overlay';
@@ -7047,7 +7115,7 @@
     const taskLabel = overlay.querySelector('#ns-task-label');
 
     function getSelectedAgentLabel() {
-      return getAgentDefinition(selectedAgent)?.label || getAgentDefinition(DEFAULT_AGENT)?.label || 'Agent';
+      return getNewSessionAgentLabel(selectedAgent);
     }
 
     function getSelectedAgentMode() {
@@ -7079,7 +7147,9 @@
 
     function renderAgentOptions() {
       if (!agentGrid) return;
-      agentGrid.innerHTML = AGENT_CATALOG.map((agent) => `
+      agentGrid.innerHTML = orderedAgents.map((agent) => {
+        const displayLabel = getNewSessionAgentLabel(agent.id);
+        return `
         <button
           type="button"
           class="ns-agent-card${agent.id === selectedAgent ? ' active' : ''}"
@@ -7087,10 +7157,11 @@
           aria-pressed="${agent.id === selectedAgent ? 'true' : 'false'}"
         >
           <span class="ns-agent-card-kicker">Agent</span>
-          <span class="ns-agent-card-label">${escapeHtml(agent.label)}</span>
-          <span class="ns-agent-card-desc">用于创建新的 ${escapeHtml(agent.label)} 会话</span>
+          <span class="ns-agent-card-label">${escapeHtml(displayLabel)}</span>
+          <span class="ns-agent-card-desc">用于创建新的 ${escapeHtml(displayLabel)} 会话</span>
         </button>
-      `).join('');
+      `;
+      }).join('');
       agentGrid.querySelectorAll('[data-ns-agent]').forEach((button) => {
         button.addEventListener('click', () => {
           const nextAgent = normalizeAgent(button.dataset.nsAgent);
