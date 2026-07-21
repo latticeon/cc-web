@@ -1660,6 +1660,9 @@ function normalizeSession(session) {
   if (!Object.prototype.hasOwnProperty.call(session, 'totalUsage') || !session.totalUsage) {
     session.totalUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
   }
+  if (!Object.prototype.hasOwnProperty.call(session.totalUsage, 'contextTokens')) {
+    session.totalUsage.contextTokens = 0;
+  }
   if (!Object.prototype.hasOwnProperty.call(session, 'taskMode')) session.taskMode = 'local';
   if (!Object.prototype.hasOwnProperty.call(session, 'sshHostId')) session.sshHostId = '';
   if (!Object.prototype.hasOwnProperty.call(session, 'remoteCwd')) session.remoteCwd = '';
@@ -1754,6 +1757,29 @@ function mergeAssistantMessage(target, incoming) {
   return changed;
 }
 
+function mergeSequentialAssistantMessage(target, incoming) {
+  const targetContent = normalizeAssistantContent(target.content);
+  const incomingContent = normalizeAssistantContent(incoming.content);
+  if (incomingContent && incomingContent !== targetContent) {
+    target.content = targetContent ? `${target.content}\n\n${incoming.content}` : incoming.content;
+  }
+  if (Array.isArray(incoming.toolCalls) && incoming.toolCalls.length > 0) {
+    if (!Array.isArray(target.toolCalls)) target.toolCalls = [];
+    target.toolCalls.push(...incoming.toolCalls);
+  }
+  if (Array.isArray(incoming.steps) && incoming.steps.length > 0) {
+    if (!Array.isArray(target.steps)) target.steps = [];
+    const firstIncoming = incoming.steps[0];
+    const lastTarget = target.steps[target.steps.length - 1];
+    if (lastTarget?.type === 'text' && firstIncoming?.type === 'text') {
+      lastTarget.content = `${lastTarget.content || ''}\n\n${firstIncoming.content || ''}`;
+      target.steps.push(...incoming.steps.slice(1));
+    } else {
+      target.steps.push(...incoming.steps);
+    }
+  }
+}
+
 function upsertTrailingAssistantMessage(session, message) {
   if (!session) return { changed: false, appended: false };
   if (!Array.isArray(session.messages)) session.messages = [];
@@ -1778,6 +1804,8 @@ function upsertTrailingAssistantMessage(session, message) {
         appended: false,
       };
     }
+    mergeSequentialAssistantMessage(last, incoming);
+    return { changed: true, appended: false };
   }
 
   session.messages.push(incoming);
@@ -4612,7 +4640,8 @@ function handleMessage(ws, msg, options = {}) {
     pendingCompactRetries.set(session.id, { text: normalizedText, mode: session.permissionMode || 'yolo', reason: 'normal' });
   }
 
-  if (session.title === 'New Chat' || session.title === 'Untitled') {
+  const shouldUpdateTitle = session.title === 'New Chat' || session.title === 'Untitled';
+  if (shouldUpdateTitle) {
     session.title = derivedTitle;
   }
 
@@ -4656,6 +4685,9 @@ function handleMessage(ws, msg, options = {}) {
     });
   }
   sendSessionList(ws);
+  if (shouldUpdateTitle) {
+    wsSend(ws, { type: 'session_renamed', sessionId: currentSessionId, title: session.title });
+  }
 
   const spawnSpec = buildSpawnSpec(session, { attachments: resolvedAttachments, text: textValue });
   if (spawnSpec?.error) {
@@ -4764,6 +4796,10 @@ function handleMessage(ws, msg, options = {}) {
     sendSessionList(ws);
   }
 
+  const fileChangeBaseline = getSessionAgent(session) === 'codex'
+    ? getGitWorkingTreeStats(spawnSpec.cwd)
+    : new Map();
+
   try {
     if (stdinMode === 'stream-json') {
       // stream-json requires an open pipe (not a closed file) so Claude doesn't exit on EOF
@@ -4851,6 +4887,7 @@ function handleMessage(ws, msg, options = {}) {
     lastError: null,
     errorSent: false,
     tailer: null,
+    fileChangeBaseline,
   };
   activeProcesses.set(currentSessionId, entry);
   sendSessionList(ws);
@@ -4894,6 +4931,46 @@ function sanitizeToolInput(toolName, input) {
   return truncateObj(parsed, 500);
 }
 
+function getGitWorkingTreeStats(cwd) {
+  const stats = new Map();
+  if (!cwd) return stats;
+  const normalizeKey = (filePath) => {
+    const absolute = path.resolve(cwd, filePath);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  };
+  try {
+    const diff = spawnSync('git', ['-c', 'core.quotepath=false', 'diff', '--numstat', 'HEAD', '--'], {
+      cwd,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    if (diff.status === 0) {
+      for (const line of String(diff.stdout || '').split(/\r?\n/)) {
+        const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+        if (!match || match[1] === '-' || match[2] === '-') continue;
+        stats.set(normalizeKey(match[3]), { additions: Number(match[1]), deletions: Number(match[2]) });
+      }
+    }
+    const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+      cwd,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    if (untracked.status === 0) {
+      for (const relativePath of String(untracked.stdout || '').split('\0').filter(Boolean)) {
+        try {
+          const content = fs.readFileSync(path.resolve(cwd, relativePath), 'utf8');
+          const additions = content ? content.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n').length : 0;
+          stats.set(normalizeKey(relativePath), { additions, deletions: 0 });
+        } catch {}
+      }
+    }
+  } catch {}
+  return stats;
+}
+
 const {
   buildSpawnSpec,
   processRuntimeEvent,
@@ -4919,6 +4996,7 @@ const {
   saveSession,
   setRuntimeSessionId,
   getRuntimeSessionId,
+  getGitWorkingTreeStats,
 });
 
 // === Check Update ===

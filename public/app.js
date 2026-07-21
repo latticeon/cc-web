@@ -66,11 +66,11 @@
         title: '选择 Codex 模型',
         secondaryTitle: '选择 Thinking 强度',
         baseOptions: [
-          { value: 'gpt-5.5', label: 'GPT-5.5', desc: '最新 Codex 模型' },
-          { value: 'gpt-5.4', label: 'GPT-5.4', desc: '当前主力 Codex 模型' },
-          { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: '偏工程执行场景' },
-          { value: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', desc: '兼容旧路由与旧配置' },
-          { value: 'gpt-5.2', label: 'GPT-5.2', desc: '通用 OpenAI 兼容模型' },
+          { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'GPT-5.6 Sol 模型' },
+          { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'GPT-5.6 Terra 模型' },
+          { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', desc: 'GPT-5.6 Luna 模型' },
+          { value: 'gpt-5.5', label: 'GPT-5.5', desc: 'GPT-5.5 模型' },
+          { value: 'gpt-5.4', label: 'GPT-5.4', desc: 'GPT-5.4 模型' },
         ],
         thinkingOptions: [
           { value: 'low', label: '低', desc: '低强度 thinking' },
@@ -248,6 +248,8 @@
   let pendingAgentModelRequests = new Map();
   let agentModelRequestSeq = 0;
   let isGenerating = false;
+  let currentContextTokens = 0;
+  let generationUsageResolved = false;
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let pendingText = '';
@@ -1430,16 +1432,17 @@
     if (!message || typeof message !== 'object') return 0;
     if (message.role === 'system') return 0;
     let chars = 0;
-    chars += extractTextFromContentNode(message.content).length;
-    if (Array.isArray(message.steps)) {
+    const hasCanonicalSteps = message.role === 'assistant' && Array.isArray(message.steps) && message.steps.length > 0;
+    if (!hasCanonicalSteps) chars += extractTextFromContentNode(message.content).length;
+    if (hasCanonicalSteps) {
       for (const step of message.steps) {
         if (!step || typeof step !== 'object') continue;
         chars += extractTextFromContentNode(step.content).length;
-        chars += extractTextFromContentNode(step.result).length;
-        chars += extractTextFromContentNode(step.input).length;
+        if (step.result !== undefined) chars += JSON.stringify(step.result).length;
+        if (step.input !== undefined) chars += JSON.stringify(step.input).length;
       }
     }
-    if (Array.isArray(message.toolCalls)) {
+    if (!hasCanonicalSteps && Array.isArray(message.toolCalls)) {
       for (const toolCall of message.toolCalls) {
         if (!toolCall || typeof toolCall !== 'object') continue;
         chars += JSON.stringify(toolCall).length;
@@ -1549,7 +1552,13 @@
 
   function updateContextUsageDisplay() {
     if (!chatContextRow || !chatContextText || !chatContextProgressBar || !chatContextLabel) return;
-    const estimatedTokens = estimateMessagesContextTokens(currentSessionMessages) + estimateActiveDraftContextTokens();
+    const fallbackTokens = estimateMessagesContextTokens(currentSessionMessages);
+    let estimatedTokens = currentContextTokens > 0 ? currentContextTokens : fallbackTokens;
+    if (isGenerating && !generationUsageResolved) {
+      const lastMessage = currentSessionMessages[currentSessionMessages.length - 1];
+      const pendingUserTokens = lastMessage?.role === 'user' ? estimateMessageContextTokens(lastMessage) : 0;
+      estimatedTokens += pendingUserTokens + estimateActiveDraftContextTokens();
+    }
     const contextLimit = resolveCurrentContextLimit();
 
     if (!currentSessionId || (!estimatedTokens && !contextLimit)) {
@@ -1811,6 +1820,8 @@
     setCurrentAgent(agent);
     currentCodebuddyProfile = '';
     currentSessionId = null;
+    currentContextTokens = 0;
+    generationUsageResolved = false;
     loadedHistorySessionId = null;
     clearSessionLoading();
     setCurrentSessionRunningState(false);
@@ -1853,6 +1864,8 @@
     currentCodebuddyProfile = snapshot.codebuddyProfile || '';
     setCurrentSessionRunningState(snapshot.isRunning);
     setStatsDisplay(snapshot);
+    currentContextTokens = normalizeTokenCount(snapshot.totalUsage?.contextTokens);
+    generationUsageResolved = false;
     currentSessionMessages = cloneMessages(snapshot.messages || []);
     currentCwd = snapshot.cwd || null;
     currentCwdExpanded = false;
@@ -2299,9 +2312,12 @@
         if (msg.totalUsage) {
           const cacheText = msg.totalUsage.cachedInputTokens ? ` · cache ${msg.totalUsage.cachedInputTokens}` : '';
           costDisplay.textContent = `in ${msg.totalUsage.inputTokens} · out ${msg.totalUsage.outputTokens}${cacheText}`;
+          currentContextTokens = normalizeTokenCount(msg.totalUsage.contextTokens);
+          generationUsageResolved = currentContextTokens > 0;
           if (currentSessionId) {
             updateCachedSession(currentSessionId, (snapshot) => { snapshot.totalUsage = deepClone(msg.totalUsage); });
           }
+          updateContextUsageDisplay();
         }
         break;
 
@@ -2507,6 +2523,7 @@
   // --- Generating State ---
   function startGenerating() {
     isGenerating = true;
+    generationUsageResolved = false;
     setCurrentSessionRunningState(true);
     pendingText = '';
     activeToolCalls.clear();
@@ -3079,6 +3096,45 @@
     return section;
   }
 
+  function buildFileChangeList(changes) {
+    const list = document.createElement('div');
+    list.className = 'file-change-list';
+    (Array.isArray(changes) ? changes : []).forEach((change) => {
+      const row = document.createElement('div');
+      row.className = 'file-change-row';
+      row.title = change.path || '';
+
+      const action = document.createElement('span');
+      action.className = 'file-change-action';
+      action.textContent = change.kind === 'create' ? '已新增' : (change.kind === 'delete' ? '已删除' : '已编辑');
+
+      const name = document.createElement('span');
+      name.className = 'file-change-name';
+      name.textContent = String(change.path || '').split(/[\\/]/).filter(Boolean).pop() || change.path || '未知文件';
+
+      const stats = document.createElement('span');
+      stats.className = 'file-change-stats';
+      if (Number.isFinite(change.additions)) {
+        const additions = document.createElement('span');
+        additions.className = 'file-change-additions';
+        additions.textContent = `+${change.additions}`;
+        stats.appendChild(additions);
+      }
+      if (Number.isFinite(change.deletions)) {
+        const deletions = document.createElement('span');
+        deletions.className = 'file-change-deletions';
+        deletions.textContent = `-${change.deletions}`;
+        stats.appendChild(deletions);
+      }
+
+      row.appendChild(action);
+      row.appendChild(name);
+      row.appendChild(stats);
+      list.appendChild(row);
+    });
+    return list;
+  }
+
 	  function buildMsgElement(m, options = {}) {
 	    const { allowResend = false } = options;
 	    const resendPayload = allowResend && m.role === 'user'
@@ -3377,6 +3433,11 @@
       wrapper.className = `tool-call-content ${kind === 'file_change' ? 'file-change' : ''}`.trim();
       const stack = document.createElement('div');
       stack.className = 'tool-call-structured';
+      if (kind === 'file_change' && Array.isArray(tool?.meta?.changes) && tool.meta.changes.length > 0) {
+        stack.appendChild(buildFileChangeList(tool.meta.changes));
+        wrapper.appendChild(stack);
+        return wrapper;
+      }
       if (tool?.meta?.subtitle) {
         stack.appendChild(buildStructuredToolSection(kind === 'file_change' ? 'Target' : 'Tool', tool.meta.subtitle));
       }
@@ -3412,6 +3473,8 @@
     const kind = toolKind(tool);
     const keepCollapsed = agent === 'codex' || agent === 'kimi' || agent === 'opencode';
     if (tool.name === 'AskUserQuestion') {
+      details.open = true;
+    } else if (kind === 'file_change') {
       details.open = true;
     } else if (!keepCollapsed && !done && kind === 'command_execution') {
       details.open = true;

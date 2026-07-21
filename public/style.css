@@ -1405,7 +1405,8 @@ body.session-loading-active {
 /* System messages */
 .msg.system {
   align-self: center;
-  max-width: 90%;
+  justify-content: center;
+  width: 100%;
 }
 .msg.system .msg-bubble {
   background: var(--bg-tertiary);
@@ -1683,6 +1684,44 @@ body.session-loading-active {
   color: var(--text-muted);
   font-style: italic;
 }
+.file-change-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.file-change-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.45;
+}
+.file-change-row::before {
+  content: '◇';
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.file-change-action {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+.file-change-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  text-underline-offset: 2px;
+}
+.file-change-stats {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.file-change-additions { color: var(--success); }
+.file-change-deletions { color: var(--danger); }
 
 /* Tool group (auto-fold) */
 .tool-group {
