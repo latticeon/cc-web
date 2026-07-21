@@ -236,6 +236,33 @@
       desc: '更明亮的留白和更克制的棕色强调，像编辑台一样安静。',
       swatches: ['#f6f1e8', '#efe8dc', '#8b5e3c', '#2f4b45'],
     },
+    {
+      value: 'midnight',
+      label: 'Midnight Dark',
+      desc: '深灰工作台搭配青绿强调，适合夜间长时间使用。',
+      swatches: ['#141715', '#1d211f', '#4fa88c', '#edf2ee'],
+    },
+  ];
+
+  const FONT_OPTIONS = [
+    {
+      value: 'system',
+      label: '系统默认',
+      desc: '跟随当前系统的界面字体。',
+      preview: 'Aa 字',
+    },
+    {
+      value: 'mono',
+      label: 'Chivo Mono',
+      desc: '清晰规整的等宽字体。',
+      preview: 'Aa 01',
+    },
+    {
+      value: 'modern',
+      label: '现代无衬线',
+      desc: '紧凑清爽的现代界面字体。',
+      preview: 'Aa 字',
+    },
   ];
 
   // --- State ---
@@ -260,6 +287,7 @@
   let currentAgent = AGENT_LABELS[localStorage.getItem('cc-web-agent')] ? localStorage.getItem('cc-web-agent') : DEFAULT_AGENT;
   let currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
   let currentTheme = (document.documentElement.dataset.theme || localStorage.getItem('cc-web-theme') || 'washi');
+  let currentFont = (document.documentElement.dataset.font || localStorage.getItem('cc-web-font') || 'system');
   let codexConfigCache = null;
   let codebuddyConfigCache = null;
   let loadedHistorySessionId = null;
@@ -584,6 +612,28 @@
     refreshThemeSummaries();
   }
 
+  function normalizeFont(font) {
+    return FONT_OPTIONS.some((item) => item.value === font) ? font : 'system';
+  }
+
+  function getFontOption(font) {
+    return FONT_OPTIONS.find((item) => item.value === normalizeFont(font)) || FONT_OPTIONS[0];
+  }
+
+  function refreshFontSummaries() {
+    const label = getFontOption(currentFont).label;
+    document.querySelectorAll('[data-font-summary]').forEach((node) => {
+      node.textContent = label;
+    });
+  }
+
+  function applyFont(font) {
+    currentFont = normalizeFont(font);
+    document.documentElement.dataset.font = currentFont;
+    localStorage.setItem('cc-web-font', currentFont);
+    refreshFontSummaries();
+  }
+
   function buildThemePickerHtml(options = {}) {
     const { showSectionTitle = true } = options;
     return `
@@ -613,13 +663,47 @@
     });
   }
 
-  function buildThemeEntryHtml() {
+  function buildFontPickerHtml() {
+    return `
+      <div class="font-grid">
+        ${FONT_OPTIONS.map((font) => `
+          <button class="font-card${font.value === currentFont ? ' active' : ''}" type="button" data-font-value="${font.value}">
+            <span class="font-card-preview" data-font-preview="${font.value}">${escapeHtml(font.preview)}</span>
+            <span class="font-card-copy">
+              <span class="font-card-title">${escapeHtml(font.label)}</span>
+              <span class="font-card-desc">${escapeHtml(font.desc)}</span>
+            </span>
+          </button>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function mountFontPicker(panel) {
+    panel.querySelectorAll('[data-font-value]').forEach((button) => {
+      button.addEventListener('click', () => {
+        applyFont(button.dataset.fontValue);
+        panel.querySelectorAll('[data-font-value]').forEach((item) => {
+          item.classList.toggle('active', item.dataset.fontValue === currentFont);
+        });
+      });
+    });
+  }
+
+  function buildAppearanceEntryHtml() {
     return `
       <div class="settings-section-title">外观</div>
       <button class="settings-nav-card" type="button" data-open-theme-page>
         <span class="settings-nav-card-main">
           <span class="settings-nav-card-title">界面主题</span>
           <span class="settings-nav-card-meta">当前：<span data-theme-summary>${escapeHtml(getThemeOption(currentTheme).label)}</span></span>
+        </span>
+        <span class="settings-nav-card-arrow" aria-hidden="true">›</span>
+      </button>
+      <button class="settings-nav-card" type="button" data-open-font-page>
+        <span class="settings-nav-card-main">
+          <span class="settings-nav-card-title">界面字体</span>
+          <span class="settings-nav-card-meta">当前：<span data-font-summary>${escapeHtml(getFontOption(currentFont).label)}</span></span>
         </span>
         <span class="settings-nav-card-arrow" aria-hidden="true">›</span>
       </button>
@@ -1949,6 +2033,41 @@
 
     showOptionPicker(modelControl.title || '选择模型', options, currentModel, (value) => {
       send({ type: 'message', text: `/model ${value}`, sessionId: requestedSessionId, mode: currentMode, agent: requestedAgent });
+    });
+  }
+
+  function openFontSubpage() {
+    const overlay = document.createElement('div');
+    overlay.className = 'settings-overlay settings-subpage-overlay';
+    overlay.style.zIndex = '10001';
+
+    const panel = document.createElement('div');
+    panel.className = 'settings-panel settings-subpage-panel';
+    panel.innerHTML = `
+      <div class="settings-header settings-subpage-header">
+        <button class="settings-back" type="button" aria-label="返回">‹</button>
+        <div class="settings-subpage-copy">
+          <div class="settings-subpage-kicker">Typography</div>
+          <h3>界面字体</h3>
+        </div>
+        <button class="settings-close" type="button" title="关闭">&times;</button>
+      </div>
+      ${buildFontPickerHtml()}
+    `;
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    mountFontPicker(panel);
+    refreshFontSummaries();
+
+    const closeSubpage = () => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+
+    panel.querySelector('.settings-back').addEventListener('click', closeSubpage);
+    panel.querySelector('.settings-close').addEventListener('click', closeSubpage);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeSubpage();
     });
   }
 
@@ -5265,7 +5384,7 @@
 
       <div class="settings-divider"></div>
 
-      ${buildThemeEntryHtml()}
+      ${buildAppearanceEntryHtml()}
 
       <div class="settings-divider"></div>
 
@@ -5297,6 +5416,8 @@
     const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
     const themePageBtn = panel.querySelector('[data-open-theme-page]');
     if (themePageBtn) themePageBtn.addEventListener('click', openThemeSubpage);
+    const fontPageBtn = panel.querySelector('[data-open-font-page]');
+    if (fontPageBtn) fontPageBtn.addEventListener('click', openFontSubpage);
     const notifyPageBtn2 = panel.querySelector('[data-open-notify-page]');
     if (notifyPageBtn2) notifyPageBtn2.addEventListener('click', openNotifySubpage);
     const devPageBtn = panel.querySelector('[data-open-dev-page]');
@@ -7704,6 +7825,7 @@
 
   // --- Init ---
   applyTheme(currentTheme);
+  applyFont(currentFont);
   setCurrentAgent(currentAgent);
   renderSessionList();
   connect();

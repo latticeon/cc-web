@@ -12,7 +12,12 @@
   <script>
     (function () {
       var theme = localStorage.getItem('cc-web-theme') || 'washi';
+      var font = localStorage.getItem('cc-web-font');
+      if (!font) {
+        font = theme === 'coolvibe' ? 'mono' : (theme === 'editorial' ? 'modern' : 'system');
+      }
       document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.font = font;
     })();
   </script>
   <link rel="stylesheet" href="style.css">
