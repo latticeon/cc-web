@@ -3040,7 +3040,7 @@
 
   function assistantTextStepHasMeaningfulText(step) {
     const textDiv = step?.querySelector('.msg-text');
-    return !!(textDiv && textDiv.textContent.trim());
+    return !!(textDiv && !textDiv.querySelector('.typing-indicator') && textDiv.textContent.trim());
   }
 
   function assistantTextStepHasDisplayContent(step) {

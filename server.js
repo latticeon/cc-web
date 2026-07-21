@@ -2839,6 +2839,10 @@ function isContextLimitError(agent, raw) {
 function handleProcessComplete(sessionId, exitCode, signal) {
   const entry = activeProcesses.get(sessionId);
   if (!entry) return;
+  if (entry.protocolExitTimer) {
+    clearTimeout(entry.protocolExitTimer);
+    entry.protocolExitTimer = null;
+  }
 
   const completeTime = new Date().toISOString();
   const wsConnected = !!entry.ws;
@@ -3049,6 +3053,29 @@ function handleProcessComplete(sessionId, exitCode, signal) {
   }
 }
 
+function scheduleProtocolProcessExit(sessionId, entry) {
+  if (!entry?.protocolComplete || entry.protocolExitScheduled || !entry.pid) return;
+  entry.protocolExitScheduled = true;
+  plog('INFO', 'runtime_protocol_complete', {
+    sessionId: sessionId.slice(0, 8),
+    pid: entry.pid,
+    agent: entry.agent || 'claude',
+  });
+  entry.protocolExitTimer = setTimeout(() => {
+    entry.protocolExitTimer = null;
+    const current = activeProcesses.get(sessionId);
+    if (current !== entry || !current.protocolComplete || current.childExited) return;
+    if (!getLiveProcessStatus(current).alive) return;
+    killProcess(current.pid, IS_WIN);
+    if (!IS_WIN) {
+      setTimeout(() => {
+        const pending = activeProcesses.get(sessionId);
+        if (pending === entry && !pending.childExited) killProcess(pending.pid, true);
+      }, 1000);
+    }
+  }, 100);
+}
+
 // Global PID monitor: detect process completion (especially after server restart)
 setInterval(() => {
   for (const [sessionId, entry] of activeProcesses) {
@@ -3133,6 +3160,7 @@ function recoverProcesses() {
             try {
               const event = JSON.parse(line);
               processRuntimeEvent(entry, event, sessionId);
+              scheduleProtocolProcessExit(sessionId, entry);
             } catch {}
           });
           entry.tailer.start();
@@ -5069,6 +5097,11 @@ function handleMessage(ws, msg, options = {}) {
 
   // Fast exit detection (while Node.js is running)
   proc.on('exit', (code, signal) => {
+    entry.childExited = true;
+    if (entry.protocolExitTimer) {
+      clearTimeout(entry.protocolExitTimer);
+      entry.protocolExitTimer = null;
+    }
     plog('INFO', 'process_exit_event', {
       sessionId: currentSessionId.slice(0, 8),
       pid: proc.pid,
@@ -5106,6 +5139,7 @@ function handleMessage(ws, msg, options = {}) {
     try {
       const event = JSON.parse(line);
       processRuntimeEvent(entry, event, currentSessionId);
+      scheduleProtocolProcessExit(currentSessionId, entry);
     } catch {}
   });
   entry.tailer.start();

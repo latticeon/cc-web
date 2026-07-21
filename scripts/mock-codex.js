@@ -111,4 +111,8 @@ function readStdin() {
     type: 'turn.completed',
     usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 5 },
   })}\n`);
+
+  if (input === 'complete then linger') {
+    setInterval(() => {}, 1000);
+  }
 })();
