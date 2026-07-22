@@ -4121,6 +4121,10 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         }
         session.messages = [];
         clearRuntimeSessionId(session);
+        session.totalUsage = {
+          ...(session.totalUsage || {}),
+          contextTokens: 0,
+        };
         session.updated = new Date().toISOString();
         saveSession(session);
         wsSend(ws, {
@@ -4483,6 +4487,16 @@ function handleLoadSession(ws, sessionId) {
     if (localMeta?.cwd) {
       session.cwd = localMeta.cwd;
       if (!session.importedFrom && localMeta.projectDir) session.importedFrom = localMeta.projectDir;
+      saveSession(session);
+    }
+  }
+  if (getSessionAgent(session) === 'codex') {
+    const contextTokens = getLatestCodexContextTokens(getRuntimeSessionId(session));
+    if (contextTokens > 0 && contextTokens !== session.totalUsage?.contextTokens) {
+      session.totalUsage = {
+        ...(session.totalUsage || {}),
+        contextTokens,
+      };
       saveSession(session);
     }
   }
@@ -5239,6 +5253,7 @@ const {
   saveSession,
   setRuntimeSessionId,
   getRuntimeSessionId,
+  resolveCodexContextTokens: (session) => getLatestCodexContextTokens(getRuntimeSessionId(session)),
   getGitWorkingTreeStats,
 });
 
@@ -5397,10 +5412,12 @@ function parseJsonlToMessages(lines) {
 const {
   parseCodexRolloutLines,
   getCodexRolloutFiles,
+  getLatestCodexContextTokens,
   getImportedCodexThreadIds,
   parseCodexRolloutFile,
 } = createCodexRolloutStore({
   codexSessionsDir: CODEX_SESSIONS_DIR,
+  codexContextDirs: [path.join(CODEX_RUNTIME_HOME, 'sessions')],
   sessionsDir: SESSIONS_DIR,
   normalizeSession,
   sanitizeToolInput,

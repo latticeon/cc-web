@@ -2660,6 +2660,7 @@
           activeToolCalls.get(msg.toolUseId).result = msg.result;
         }
         updateToolCall(msg.toolUseId, msg.result);
+        showStreamingThinkingIndicator();
         break;
 
       case 'cost':
@@ -2918,11 +2919,10 @@
     msgEl.id = 'streaming-msg';
     const bubble = msgEl.querySelector('.msg-bubble');
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
-    ensureStreamingTextStep(msgEl);
     messagesDiv.appendChild(msgEl);
+    showStreamingThinkingIndicator();
     updateContextUsageDisplay();
     syncLastUserResendAction();
-    scrollToBottom();
   }
 
   function finishGenerating(sessionId) {
@@ -3261,6 +3261,14 @@
     finalDiv.appendChild(step);
     updateAssistantBubbleLayout(bubble, { complete: false, running: true });
     return step;
+  }
+
+  function showStreamingThinkingIndicator() {
+    if (!isGenerating) return;
+    const streamEl = document.getElementById('streaming-msg');
+    if (!streamEl) return;
+    ensureStreamingTextStep(streamEl);
+    scrollToBottom();
   }
 
   function renderAssistantStepsIntoBubble(bubble, steps, attachments = [], options = {}) {

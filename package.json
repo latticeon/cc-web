@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "regression": "node scripts/regression.js"
+    "regression": "node scripts/regression.js",
+    "test:context": "node scripts/context-usage-test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
