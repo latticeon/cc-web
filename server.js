@@ -5415,6 +5415,7 @@ const {
   getLatestCodexContextTokens,
   getImportedCodexThreadIds,
   parseCodexRolloutFile,
+  parseCodexRolloutMetaFile,
 } = createCodexRolloutStore({
   codexSessionsDir: CODEX_SESSIONS_DIR,
   codexContextDirs: [path.join(CODEX_RUNTIME_HOME, 'sessions')],
@@ -6960,13 +6961,13 @@ function collectCwdSuggestionItems(agent) {
     const imported = getImportedCodexThreadIds();
     const seen = new Set();
     for (const filePath of getCodexRolloutFiles()) {
-      const parsed = parseCodexRolloutFile(filePath);
-      const threadId = parsed?.meta?.threadId;
+      const meta = parseCodexRolloutMetaFile(filePath);
+      const threadId = meta?.threadId;
       if (!threadId || seen.has(threadId) || imported.has(threadId)) continue;
       seen.add(threadId);
-      addCwdSuggestion(items, parsed.meta.cwd, {
-        title: parsed.meta.title || threadId.slice(0, 20),
-        updatedAt: parsed.meta.updatedAt || null,
+      addCwdSuggestion(items, meta.cwd, {
+        title: meta.title || threadId.slice(0, 20),
+        updatedAt: meta.updatedAt || null,
         imported: false,
         sourceKind: 'codex-rollout',
       });

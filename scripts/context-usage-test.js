@@ -46,6 +46,32 @@ try {
 
   assert.strictEqual(store.getLatestCodexContextTokens(threadId), 55989);
   assert.strictEqual(store.getLatestCodexContextTokens('missing-thread'), 0);
+
+  const metaEntry = {
+    type: 'session_meta',
+    payload: { id: threadId, cwd: 'C:\\workspace\\demo' },
+  };
+  const userEntry = {
+    type: 'event_msg',
+    payload: { type: 'user_message', message: '检查目录加载速度', details: 'x'.repeat(1024 * 1024) },
+  };
+  const injectedContextEntry = {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '# AGENTS.md instructions' }],
+    },
+  };
+  fs.writeFileSync(
+    rolloutPath,
+    `${JSON.stringify(metaEntry)}\n${JSON.stringify(injectedContextEntry)}\n${'x'.repeat(80 * 1024)}\n${JSON.stringify(userEntry)}\n`,
+    'utf8'
+  );
+  const meta = store.parseCodexRolloutMetaFile(rolloutPath);
+  assert.strictEqual(meta.threadId, threadId);
+  assert.strictEqual(meta.cwd, 'C:\\workspace\\demo');
+  assert.strictEqual(meta.title, '检查目录加载速度');
   console.log('context usage regression test passed');
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
