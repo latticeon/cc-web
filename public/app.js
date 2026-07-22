@@ -384,6 +384,7 @@
   const cmdMenu = $('#cmd-menu');
   const modeSelect = $('#mode-select');
   const splitLayout = splitLayoutView.createSplitLayout({ app, sidebarResizer, rightResizer: gitPanelResizer });
+  const desktopLayoutQuery = window.matchMedia('(min-width: 769px)');
 
   function requestGitStatus() {
     if (!currentSessionId) {
@@ -739,14 +740,19 @@
     gitPanelBody.appendChild(viewer);
   }
 
-  function setGitPanelOpen(open) {
+  function setGitPanelOpen(open, options = {}) {
     gitPanelOpen = !!open;
     gitPanel.hidden = !gitPanelOpen;
     splitLayout.setRightPanelOpen(gitPanelOpen);
+    if (options.remember !== false) splitLayout.rememberRightPanelOpen(gitPanelOpen);
     gitChangesBtn.classList.toggle('active', gitPanelOpen);
     gitChangesBtn.setAttribute('aria-expanded', String(gitPanelOpen));
     if (gitPanelOpen) setWorkspaceTab(workspaceTab);
     else if (gitHistoryObserver) gitHistoryObserver.disconnect();
+  }
+
+  function restoreGitPanelOpenState() {
+    setGitPanelOpen(splitLayout.getRememberedRightPanelOpen(true), { remember: false });
   }
 
   // --- Viewport height fix for mobile browsers ---
@@ -2732,13 +2738,12 @@
     switch (msg.type) {
       case 'auth_result':
         if (msg.success) {
-          const firstAppReveal = app.hidden;
           authToken = msg.token;
           localStorage.setItem('cc-web-token', msg.token);
           document.dispatchEvent(new CustomEvent('cc-web-auth-restored'));
           loginOverlay.hidden = true;
           app.hidden = false;
-          if (firstAppReveal && window.matchMedia('(min-width: 769px)').matches) setGitPanelOpen(true);
+          restoreGitPanelOpenState();
           send({ type: 'get_codex_config' });
           // Check if must change password
           if (msg.mustChangePassword) {
@@ -4882,10 +4887,6 @@
     msgInput.style.height = Math.min(msgInput.scrollHeight, max) + 'px';
   }
 
-  function isMobileInputMode() {
-    return window.matchMedia('(max-width: 768px), (pointer: coarse)').matches;
-  }
-
   // --- Event Listeners ---
   loginForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -5065,6 +5066,9 @@
   workspaceTabs.forEach((button) => {
     button.addEventListener('click', () => setWorkspaceTab(button.dataset.workspaceTab));
   });
+  desktopLayoutQuery.addEventListener('change', () => {
+    if (!app.hidden) restoreGitPanelOpenState();
+  });
   if (attachBtn && imageUploadInput) {
     attachBtn.addEventListener('click', () => imageUploadInput.click());
     imageUploadInput.addEventListener('change', () => {
@@ -5156,22 +5160,15 @@
       if (e.key === 'Tab') { e.preventDefault(); selectCmdMenuItem(); return; }
       if (e.key === 'Escape') { hideCmdMenu(); return; }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (isMobileInputMode()) {
-        if (!cmdMenu.hidden) {
-          e.preventDefault();
-          selectCmdMenuItem();
-        }
-        return;
-      }
-
+    if (e.key !== 'Enter' || e.isComposing) return;
+    if (!cmdMenu.hidden && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
-      if (!cmdMenu.hidden) {
-        // If menu is open and user presses Enter, select the item
-        selectCmdMenuItem();
-      } else {
-        sendMessage();
-      }
+      selectCmdMenuItem();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      sendMessage();
     }
   });
 

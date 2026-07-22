@@ -57,6 +57,7 @@
     const storageKeys = {
       sidebar: 'cc-web-sidebar-width',
       right: 'cc-web-git-panel-width',
+      rightOpen: 'cc-web-git-panel-open',
     };
     const preferred = {
       sidebar: normalizeWidth(readStoredWidth(storage, storageKeys.sidebar), limits.sidebar),
@@ -153,6 +154,16 @@
     applyLayout();
     return {
       refresh: applyLayout,
+      getRememberedRightPanelOpen(defaultOpen = true) {
+        if (!desktopQuery.matches) return false;
+        return readStoredBoolean(storage, storageKeys.rightOpen, defaultOpen);
+      },
+      rememberRightPanelOpen(open) {
+        if (!desktopQuery.matches) return;
+        try {
+          storage.setItem(storageKeys.rightOpen, open ? '1' : '0');
+        } catch {}
+      },
       setRightPanelOpen(open) {
         rightOpen = !!open;
         rightResizer.hidden = !rightOpen;
@@ -166,6 +177,15 @@
       return storage.getItem(key);
     } catch {
       return null;
+    }
+  }
+
+  function readStoredBoolean(storage, key, fallback) {
+    try {
+      const value = storage.getItem(key);
+      return value === null ? fallback : value === '1';
+    } catch {
+      return fallback;
     }
   }
 

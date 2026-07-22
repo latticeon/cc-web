@@ -36,6 +36,8 @@ function createEventTarget(extra = {}) {
 
 const originalDocument = global.document;
 const originalResizeObserver = global.ResizeObserver;
+const storedValues = new Map();
+const desktopQuery = { matches: true };
 global.document = {
   body: { classList: { add() {}, remove() {} } },
   addEventListener() {},
@@ -54,10 +56,21 @@ try {
     app,
     sidebarResizer: createEventTarget(),
     rightResizer: createEventTarget({ hidden: true }),
-    storage: { getItem() { return null; }, setItem() {} },
-    desktopQuery: { matches: true },
+    storage: {
+      getItem(key) { return storedValues.has(key) ? storedValues.get(key) : null; },
+      setItem(key, value) { storedValues.set(key, value); },
+    },
+    desktopQuery,
   });
   assert.strictEqual(typeof layout.setRightPanelOpen, 'function');
+  assert.strictEqual(layout.getRememberedRightPanelOpen(), true);
+  layout.rememberRightPanelOpen(false);
+  assert.strictEqual(layout.getRememberedRightPanelOpen(), false);
+  desktopQuery.matches = false;
+  layout.rememberRightPanelOpen(true);
+  assert.strictEqual(layout.getRememberedRightPanelOpen(), false);
+  assert.strictEqual(storedValues.get('cc-web-git-panel-open'), '0');
+  desktopQuery.matches = true;
   layout.setRightPanelOpen(true);
 } finally {
   global.document = originalDocument;
