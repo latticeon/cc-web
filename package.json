@@ -5,7 +5,10 @@
   "scripts": {
     "start": "node server.js",
     "regression": "node scripts/regression.js",
-    "test:context": "node scripts/context-usage-test.js"
+    "test:context": "node scripts/context-usage-test.js",
+    "test:git-workspace": "node scripts/git-workspace-test.js",
+    "test:chat-stream": "node scripts/chat-stream-state-test.js",
+    "test:split-layout": "node scripts/split-layout-test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

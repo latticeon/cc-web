@@ -65,6 +65,8 @@
       </div>
     </aside>
 
+    <div id="sidebar-resizer" class="column-resizer" role="separator" aria-label="调整会话栏宽度" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="480" tabindex="0" title="拖动调整会话栏宽度，双击恢复默认"></div>
+
     <div id="sidebar-overlay" class="sidebar-overlay" hidden></div>
 
     <!-- Chat -->
@@ -146,20 +148,23 @@
       </div>
     </main>
 
-    <aside id="git-panel" class="git-panel" hidden aria-label="Git 变更">
+    <div id="git-panel-resizer" class="column-resizer" role="separator" aria-label="调整右侧栏宽度" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="720" tabindex="0" title="拖动调整右侧栏宽度，双击恢复默认" hidden></div>
+
+    <aside id="git-panel" class="git-panel" hidden aria-label="Git 与工作区">
       <header class="git-panel-header">
         <div class="git-panel-heading">
-          <strong>Git 变更</strong>
+          <strong id="git-panel-title">Git 变更</strong>
           <span id="git-branch" class="git-branch"></span>
         </div>
         <div class="git-panel-actions">
-          <button id="git-refresh-btn" class="git-panel-icon-btn" type="button" title="刷新 Git 变更">&#8635;</button>
-          <button id="git-close-btn" class="git-panel-icon-btn" type="button" title="关闭 Git 变更">&#215;</button>
+          <button id="git-refresh-btn" class="git-panel-icon-btn" type="button" title="刷新当前视图">&#8635;</button>
+          <button id="git-close-btn" class="git-panel-icon-btn" type="button" title="关闭右侧栏">&#215;</button>
         </div>
       </header>
       <div class="workspace-tabs" role="tablist" aria-label="工作区视图">
         <button class="workspace-tab active" type="button" data-workspace-tab="changes" role="tab" aria-selected="true">Git 变更</button>
         <button class="workspace-tab" type="button" data-workspace-tab="files" role="tab" aria-selected="false">全部文件</button>
+        <button class="workspace-tab" type="button" data-workspace-tab="history" role="tab" aria-selected="false">提交记录</button>
       </div>
       <div id="git-panel-body" class="git-panel-body">
         <div class="git-panel-empty">打开一个项目会话后查看变更</div>
@@ -181,6 +186,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script src="/api/agents.js"></script>
+  <script src="git-workspace-view.js"></script>
+  <script src="chat-stream-state.js"></script>
+  <script src="split-layout.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

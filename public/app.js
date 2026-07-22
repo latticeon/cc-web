@@ -4,6 +4,9 @@
 
   const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   const RENDER_DEBOUNCE = 100;
+  const gitWorkspaceView = window.CcGitWorkspaceView;
+  const { finalizeActiveToolCalls } = window.CcChatStreamState;
+  const splitLayoutView = window.CcSplitLayout;
 
   const SLASH_COMMANDS = [
     { cmd: '/clear', desc: '清除当前会话' },
@@ -311,6 +314,18 @@
   let workspaceTab = 'changes';
   let currentWorkspacePath = '';
   let fileViewerSourceTab = 'files';
+  let gitHistoryRequestSeq = 0;
+  let gitHistoryObserver = null;
+  let gitHistoryState = {
+    sessionId: null,
+    commits: [],
+    nextOffset: 0,
+    hasMore: true,
+    loading: false,
+    available: null,
+    error: '',
+    requestId: '',
+  };
 
   // --- DOM ---
   const $ = (sel) => document.querySelector(sel);
@@ -323,6 +338,7 @@
   const sessionLoadingOverlay = $('#session-loading-overlay');
   const sessionLoadingLabel = $('#session-loading-label');
   const sidebar = $('#sidebar');
+  const sidebarResizer = $('#sidebar-resizer');
   const sidebarOverlay = $('#sidebar-overlay');
   const menuBtn = $('#menu-btn');
   const chatMain = document.querySelector('.chat-main');
@@ -350,7 +366,9 @@
   const gitChangesBtn = $('#git-changes-btn');
   const gitChangesCount = $('#git-changes-count');
   const gitPanel = $('#git-panel');
+  const gitPanelResizer = $('#git-panel-resizer');
   const gitPanelBody = $('#git-panel-body');
+  const gitPanelTitle = $('#git-panel-title');
   const gitBranch = $('#git-branch');
   const gitRefreshBtn = $('#git-refresh-btn');
   const gitCloseBtn = $('#git-close-btn');
@@ -365,6 +383,7 @@
   const abortBtn = $('#abort-btn');
   const cmdMenu = $('#cmd-menu');
   const modeSelect = $('#mode-select');
+  const splitLayout = splitLayoutView.createSplitLayout({ app, sidebarResizer, rightResizer: gitPanelResizer });
 
   function requestGitStatus() {
     if (!currentSessionId) {
@@ -390,6 +409,58 @@
     send({ type: 'read_workspace_file', sessionId: currentSessionId, path: filePath });
   }
 
+  function requestWorkspaceDiff(file) {
+    if (!currentSessionId || !file?.path) return;
+    fileViewerSourceTab = 'changes';
+    gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取差异...</div>';
+    send({
+      type: 'read_workspace_diff',
+      sessionId: currentSessionId,
+      path: file.path,
+      originalPath: file.originalPath || '',
+      status: file.status || 'modified',
+    });
+  }
+
+  function resetGitHistoryState() {
+    if (gitHistoryObserver) gitHistoryObserver.disconnect();
+    gitHistoryObserver = null;
+    gitHistoryState = {
+      sessionId: currentSessionId,
+      commits: [],
+      nextOffset: 0,
+      hasMore: true,
+      loading: false,
+      available: null,
+      error: '',
+      requestId: '',
+    };
+  }
+
+  function requestGitHistory(reset = false) {
+    if (!currentSessionId) {
+      resetGitHistoryState();
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">打开一个项目会话后查看提交记录</div>';
+      return;
+    }
+    if (reset || gitHistoryState.sessionId !== currentSessionId) {
+      resetGitHistoryState();
+      gitBranch.textContent = '';
+    }
+    if (gitHistoryState.loading || !gitHistoryState.hasMore) return;
+
+    gitHistoryState.loading = true;
+    gitHistoryState.requestId = `git-history-${++gitHistoryRequestSeq}`;
+    renderGitHistory();
+    send({
+      type: 'get_git_history',
+      sessionId: currentSessionId,
+      offset: gitHistoryState.nextOffset,
+      limit: 30,
+      requestId: gitHistoryState.requestId,
+    });
+  }
+
   function formatFileSize(size) {
     if (!Number.isFinite(size)) return '';
     if (size < 1024) return `${size} B`;
@@ -398,21 +469,90 @@
   }
 
   function setWorkspaceTab(tab) {
-    workspaceTab = tab === 'files' ? 'files' : 'changes';
+    workspaceTab = ['changes', 'files', 'history'].includes(tab) ? tab : 'changes';
+    if (gitHistoryObserver) gitHistoryObserver.disconnect();
+    gitHistoryObserver = null;
     workspaceTabs.forEach((button) => {
       const active = button.dataset.workspaceTab === workspaceTab;
       button.classList.toggle('active', active);
       button.setAttribute('aria-selected', String(active));
     });
+    if (gitPanelTitle) {
+      gitPanelTitle.textContent = workspaceTab === 'files'
+        ? '工作区文件'
+        : (workspaceTab === 'history' ? '提交记录' : 'Git 变更');
+    }
     if (workspaceTab === 'files') requestWorkspaceFiles();
+    else if (workspaceTab === 'history') requestGitHistory(true);
     else requestGitStatus();
+  }
+
+  function renderGitHistory() {
+    if (gitHistoryObserver) gitHistoryObserver.disconnect();
+    gitHistoryObserver = null;
+    const previousScrollTop = gitPanelBody.scrollTop;
+    gitPanelBody.innerHTML = '';
+
+    if (!currentSessionId) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">打开一个项目会话后查看提交记录</div>';
+      return;
+    }
+    if (gitHistoryState.available === false) {
+      gitPanelBody.innerHTML = `<div class="git-panel-empty">${escapeHtml(gitHistoryState.error || '当前工作目录不是 Git 仓库，或暂时无法读取')}</div>`;
+      return;
+    }
+    if (gitHistoryState.commits.length === 0 && gitHistoryState.loading) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取提交记录...</div>';
+      return;
+    }
+    if (gitHistoryState.commits.length === 0) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">当前仓库还没有提交记录</div>';
+      return;
+    }
+
+    const list = gitWorkspaceView.createHistoryList(document, gitHistoryState.commits, timeAgo);
+    gitPanelBody.appendChild(list);
+    gitPanelBody.scrollTop = previousScrollTop;
+
+    if (!gitHistoryState.hasMore) return;
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'git-history-more';
+    more.disabled = gitHistoryState.loading;
+    more.textContent = gitHistoryState.loading ? '正在加载...' : '加载更多';
+    more.addEventListener('click', () => requestGitHistory(false));
+    gitPanelBody.appendChild(more);
+
+    if (!gitHistoryState.loading && typeof IntersectionObserver === 'function') {
+      gitHistoryObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) requestGitHistory(false);
+      }, { root: gitPanelBody, rootMargin: '160px 0px' });
+      gitHistoryObserver.observe(more);
+    }
+  }
+
+  function applyGitHistory(payload) {
+    if (payload?.sessionId !== currentSessionId) return;
+    if (payload.requestId !== gitHistoryState.requestId) return;
+    gitHistoryState.loading = false;
+    gitHistoryState.available = payload.available !== false;
+    gitHistoryState.error = payload.error || '';
+    if (payload.available !== false) {
+      gitHistoryState.commits.push(...(Array.isArray(payload.commits) ? payload.commits : []));
+      gitHistoryState.nextOffset = Number.isFinite(payload.nextOffset)
+        ? payload.nextOffset
+        : gitHistoryState.commits.length;
+      gitHistoryState.hasMore = !!payload.hasMore;
+      if (payload.branch) gitBranch.textContent = payload.branch;
+    } else {
+      gitHistoryState.hasMore = false;
+    }
+    if (workspaceTab === 'history') renderGitHistory();
   }
 
   function renderGitStatus(status) {
     const files = Array.isArray(status?.files) ? status.files : [];
-    gitChangesCount.textContent = String(files.length);
-    gitChangesCount.hidden = files.length === 0;
-    gitBranch.textContent = status?.branch || '';
+    updateGitStatusHeader(status);
     gitPanelBody.innerHTML = '';
 
     if (!currentSessionId) {
@@ -465,12 +605,17 @@
         lines.appendChild(deletions);
       }
       item.appendChild(lines);
-      if (file.status !== 'deleted') {
-        item.addEventListener('click', () => requestWorkspaceFile(file.path));
-      }
+      item.addEventListener('click', () => requestWorkspaceDiff(file));
       list.appendChild(item);
     });
     gitPanelBody.appendChild(list);
+  }
+
+  function updateGitStatusHeader(status) {
+    const files = Array.isArray(status?.files) ? status.files : [];
+    gitChangesCount.textContent = String(files.length);
+    gitChangesCount.hidden = files.length === 0;
+    gitBranch.textContent = status?.branch || '';
   }
 
   function renderWorkspaceFiles(payload) {
@@ -557,12 +702,51 @@
     gitPanelBody.appendChild(viewer);
   }
 
+  function renderWorkspaceDiff(payload) {
+    gitPanelBody.innerHTML = '';
+    if (!payload?.available) {
+      gitPanelBody.innerHTML = `<div class="git-panel-empty">${escapeHtml(payload?.error || '无法预览文件差异')}</div>`;
+      return;
+    }
+
+    const viewer = document.createElement('div');
+    viewer.className = 'workspace-file-viewer';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'workspace-browser-toolbar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'workspace-back-btn';
+    back.title = '返回 Git 变更';
+    back.textContent = '‹';
+    back.addEventListener('click', requestGitStatus);
+    const pathLabel = document.createElement('span');
+    pathLabel.className = 'workspace-path';
+    pathLabel.textContent = payload.path || '';
+    toolbar.append(back, pathLabel);
+    viewer.appendChild(toolbar);
+
+    const diffText = String(payload.diff || '');
+    if (!diffText.trim()) {
+      const empty = document.createElement('div');
+      empty.className = 'git-panel-empty';
+      empty.textContent = '此文件没有可展示的文本差异';
+      viewer.appendChild(empty);
+      gitPanelBody.appendChild(viewer);
+      return;
+    }
+
+    viewer.appendChild(gitWorkspaceView.createDiffContent(document, diffText));
+    gitPanelBody.appendChild(viewer);
+  }
+
   function setGitPanelOpen(open) {
     gitPanelOpen = !!open;
     gitPanel.hidden = !gitPanelOpen;
+    splitLayout.setRightPanelOpen(gitPanelOpen);
     gitChangesBtn.classList.toggle('active', gitPanelOpen);
     gitChangesBtn.setAttribute('aria-expanded', String(gitPanelOpen));
     if (gitPanelOpen) setWorkspaceTab(workspaceTab);
+    else if (gitHistoryObserver) gitHistoryObserver.disconnect();
   }
 
   // --- Viewport height fix for mobile browsers ---
@@ -2642,13 +2826,16 @@
 
       case 'text_delta':
         if (!isGenerating) startGenerating();
+        if (normalizeAgent(currentAgent) === 'codex') {
+          finalizeActiveToolCalls(activeToolCalls, updateToolCall);
+        }
         pendingText += msg.text;
         scheduleRender();
         break;
 
       case 'tool_start':
         if (!isGenerating) startGenerating();
-        activeToolCalls.set(msg.toolUseId, { name: msg.name, input: msg.input, kind: msg.kind || null, meta: msg.meta || null, done: false });
+        activeToolCalls.set(msg.toolUseId, { id: msg.toolUseId, name: msg.name, input: msg.input, kind: msg.kind || null, meta: msg.meta || null, done: false });
         appendToolCall(msg.toolUseId, msg.name, msg.input, false, msg.kind || null, msg.meta || null);
         break;
 
@@ -2689,15 +2876,26 @@
         break;
 
       case 'git_status':
-        if (!msg.sessionId || msg.sessionId === currentSessionId) renderGitStatus(msg);
+        if (!msg.sessionId || msg.sessionId === currentSessionId) {
+          if (workspaceTab === 'changes') renderGitStatus(msg);
+          else updateGitStatusHeader(msg);
+        }
+        break;
+
+      case 'git_history':
+        applyGitHistory(msg);
         break;
 
       case 'workspace_files':
-        if (msg.sessionId === currentSessionId) renderWorkspaceFiles(msg);
+        if (msg.sessionId === currentSessionId && workspaceTab === 'files') renderWorkspaceFiles(msg);
         break;
 
       case 'workspace_file':
-        if (msg.sessionId === currentSessionId) renderWorkspaceFile(msg);
+        if (msg.sessionId === currentSessionId && workspaceTab === 'files') renderWorkspaceFile(msg);
+        break;
+
+      case 'workspace_diff':
+        if (msg.sessionId === currentSessionId && workspaceTab === 'changes') renderWorkspaceDiff(msg);
         break;
 
       case 'system_message':
@@ -2749,6 +2947,7 @@
         const toolSteps = resumeSteps.filter((step) => step && step.type === 'tool_call');
         toolSteps.forEach((tc) => {
           activeToolCalls.set(tc.id, {
+            id: tc.id,
             name: tc.name,
             input: tc.input,
             result: tc.result,
@@ -2935,6 +3134,7 @@
     msgInput.focus();
 
     if (pendingText) flushRender();
+    finalizeActiveToolCalls(activeToolCalls, updateToolCall);
 
     const streamEl = document.getElementById('streaming-msg');
     if (streamEl) {
@@ -4859,6 +5059,7 @@
   gitCloseBtn.addEventListener('click', () => setGitPanelOpen(false));
   gitRefreshBtn.addEventListener('click', () => {
     if (workspaceTab === 'files') requestWorkspaceFiles();
+    else if (workspaceTab === 'history') requestGitHistory(true);
     else requestGitStatus();
   });
   workspaceTabs.forEach((button) => {

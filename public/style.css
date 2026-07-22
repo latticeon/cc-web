@@ -24,6 +24,7 @@
   --scrollbar-thumb: #c9baa9;
   --scrollbar-track: transparent;
   --sidebar-width: 280px;
+  --git-panel-width: 320px;
   --header-height: 52px;
   --input-max-height: 200px;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -643,6 +644,7 @@ body.session-loading-active {
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
+  flex: 0 0 var(--sidebar-width);
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   display: flex;
@@ -933,6 +935,39 @@ body.session-loading-active {
   min-width: 0;
   position: relative;
   background: var(--bg-primary);
+}
+.column-resizer {
+  position: relative;
+  z-index: 5;
+  width: 7px;
+  min-width: 7px;
+  height: 100%;
+  flex: 0 0 7px;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.column-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--border-color);
+  transition: width 0.15s, left 0.15s, background 0.15s;
+}
+.column-resizer:hover::after,
+.column-resizer:focus-visible::after {
+  left: 2px;
+  width: 3px;
+  background: var(--accent);
+}
+body.column-resizing,
+body.column-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .chat-header {
   min-height: var(--header-height);
@@ -2469,13 +2504,13 @@ body.session-loading-active {
   text-align: center;
 }
 .git-panel {
-  width: 320px;
-  min-width: 280px;
+  width: var(--git-panel-width);
+  min-width: var(--git-panel-width);
   height: 100%;
   border-left: 1px solid var(--border-color);
   background: var(--bg-secondary);
   color: var(--text-primary);
-  flex: 0 0 auto;
+  flex: 0 0 var(--git-panel-width);
 }
 .git-panel-header {
   height: var(--header-height);
@@ -2523,6 +2558,7 @@ body.session-loading-active {
 .git-panel-body {
   height: calc(100% - var(--header-height) - 39px);
   padding: 10px 8px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 .workspace-tabs {
@@ -2530,7 +2566,7 @@ body.session-loading-active {
   padding: 0 8px;
   border-bottom: 1px solid var(--border-color);
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end;
 }
 .workspace-tab {
@@ -2568,6 +2604,7 @@ body.session-loading-active {
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
+  cursor: pointer;
 }
 .git-change-lines {
   display: flex;
@@ -2659,19 +2696,124 @@ body.session-loading-active {
   min-width: 0;
 }
 .workspace-file-content {
+  max-width: 100%;
   margin: 0;
   padding: 12px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  overflow: auto;
+  overflow-x: hidden;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 11px;
   line-height: 1.6;
   tab-size: 2;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
+.workspace-diff-content {
+  max-width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow-x: hidden;
+  background: var(--bg-primary);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.workspace-diff-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px 38px 18px minmax(0, 1fr);
+}
+.workspace-diff-old,
+.workspace-diff-new {
+  padding: 1px 6px;
+  border-right: 1px solid var(--border-color);
+  color: var(--text-muted);
+  text-align: right;
+  user-select: none;
+}
+.workspace-diff-marker {
+  padding: 1px 4px;
+  color: var(--text-muted);
+  text-align: center;
+  user-select: none;
+}
+.workspace-diff-code {
+  min-width: 0;
+  padding: 1px 10px 1px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.workspace-diff-line.addition {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+.workspace-diff-line.addition .workspace-diff-marker { color: var(--success); }
+.workspace-diff-line.deletion {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.workspace-diff-line.deletion .workspace-diff-marker { color: var(--danger); }
+.workspace-diff-line.hunk {
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+}
+.workspace-diff-line.meta {
+  color: var(--text-muted);
+}
+.git-history-list {
+  display: flex;
+  flex-direction: column;
+}
+.git-history-item {
+  min-width: 0;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+.git-history-item:first-child { padding-top: 4px; }
+.git-history-summary {
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.git-history-meta {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.git-history-hash {
+  color: var(--info);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+.git-history-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-history-more {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+.git-history-more:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.git-history-more:disabled { cursor: default; }
 
 /* === Option Picker === */
 .option-picker-overlay {
@@ -2958,6 +3100,7 @@ body.session-loading-active {
 
 /* === Mobile === */
 @media (max-width: 768px) {
+  .column-resizer { display: none; }
   .git-panel {
     position: fixed;
     z-index: 110;
@@ -2965,6 +3108,7 @@ body.session-loading-active {
     right: 0;
     bottom: 0;
     width: min(88vw, 340px);
+    min-width: 0;
     height: 100%;
     box-shadow: -12px 0 30px rgba(45, 31, 20, 0.16);
   }
@@ -2972,6 +3116,9 @@ body.session-loading-active {
     position: fixed;
     left: 0; top: 0; bottom: 0;
     z-index: 100;
+    width: 280px;
+    min-width: 280px;
+    flex-basis: auto;
     transform: translateX(-100%);
   }
   .sidebar.open { transform: translateX(0); }

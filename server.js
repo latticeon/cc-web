@@ -15,6 +15,7 @@ const {
   normalizeAgent,
 } = require('./lib/agent-registry');
 const { createCodexRolloutStore } = require('./lib/codex-rollouts');
+const { readGitFileDiff, readGitHistory } = require('./lib/git-workspace');
 
 // Load .env
 const envPath = path.join(__dirname, '.env');
@@ -1950,6 +1951,31 @@ function handleReadWorkspaceFile(ws, sessionId, relativePath) {
   }
 }
 
+function handleGitHistory(ws, msg) {
+  const sessionId = msg?.sessionId;
+  const workspace = getLocalSessionWorkspace(sessionId);
+  if (!workspace) {
+    return wsSend(ws, { type: 'git_history', sessionId, requestId: msg?.requestId, available: false, commits: [], hasMore: false });
+  }
+  const result = readGitHistory(workspace.cwd, { offset: msg?.offset, limit: msg?.limit });
+  wsSend(ws, { type: 'git_history', sessionId, requestId: msg?.requestId, ...result });
+}
+
+function handleWorkspaceDiff(ws, msg) {
+  const sessionId = msg?.sessionId;
+  const workspace = getLocalSessionWorkspace(sessionId);
+  if (!workspace) {
+    return wsSend(ws, { type: 'workspace_diff', sessionId, available: false, diff: '' });
+  }
+  const result = readGitFileDiff(workspace.cwd, {
+    path: msg?.path,
+    originalPath: msg?.originalPath,
+    status: msg?.status,
+    contextLines: 3,
+  });
+  wsSend(ws, { type: 'workspace_diff', sessionId, ...result });
+}
+
 function mergeSequentialAssistantMessage(target, incoming) {
   const targetContent = normalizeAssistantContent(target.content);
   const incomingContent = normalizeAssistantContent(incoming.content);
@@ -3446,11 +3472,17 @@ wss.on('connection', (ws, req) => {
       case 'get_git_status':
         handleGitStatus(ws, msg.sessionId);
         break;
+      case 'get_git_history':
+        handleGitHistory(ws, msg);
+        break;
       case 'list_workspace_files':
         handleListWorkspaceFiles(ws, msg.sessionId, msg.path);
         break;
       case 'read_workspace_file':
         handleReadWorkspaceFile(ws, msg.sessionId, msg.path);
+        break;
+      case 'read_workspace_diff':
+        handleWorkspaceDiff(ws, msg);
         break;
       case 'detach_view':
         handleDetachView(ws);
