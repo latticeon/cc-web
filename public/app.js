@@ -5,7 +5,7 @@
   const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   const RENDER_DEBOUNCE = 100;
   const gitWorkspaceView = window.CcGitWorkspaceView;
-  const { finalizeActiveToolCalls } = window.CcChatStreamState;
+  const { finalizeActiveToolCalls, normalizeElapsedDuration, formatElapsedDuration } = window.CcChatStreamState;
   const splitLayoutView = window.CcSplitLayout;
 
   const SLASH_COMMANDS = [
@@ -284,6 +284,8 @@
   let reconnectTimer = null;
   let pendingText = '';
   let renderTimer = null;
+  let generationStartedAt = 0;
+  let generationElapsedTimer = null;
   let activeToolCalls = new Map();
   let cmdMenuIndex = -1;
   let currentMode = 'yolo';
@@ -2362,6 +2364,7 @@
   }
 
   function resetChatView(agent) {
+    stopGenerationElapsedTimer();
     setCurrentAgent(agent);
     currentCodebuddyProfile = '';
     currentSessionId = null;
@@ -2397,6 +2400,7 @@
     if (!snapshot) return;
     const preserveStreaming = !!(options.preserveStreaming && isGenerating && snapshot.sessionId === currentSessionId && snapshot.isRunning);
     if (isGenerating && !preserveStreaming) {
+      stopGenerationElapsedTimer();
       isGenerating = false;
       sendBtn.hidden = false;
       abortBtn.hidden = true;
@@ -2876,7 +2880,7 @@
         break;
 
       case 'done':
-        finishGenerating(msg.sessionId);
+        finishGenerating(msg.sessionId, msg.durationMs);
         if (gitPanelOpen) setWorkspaceTab(workspaceTab);
         break;
 
@@ -2936,11 +2940,12 @@
         // Server has an active process for this session — resume streaming
         setCurrentSessionRunningState(true);
         if (!isGenerating || !document.getElementById('streaming-msg')) {
-          startGenerating();
+          startGenerating(msg.startedAt);
         } else {
           sendBtn.hidden = true;
           abortBtn.hidden = false;
           activeToolCalls.clear();
+          startGenerationElapsedTimer(msg.startedAt);
         }
         const streamBubble = document.querySelector('#streaming-msg .msg-bubble');
         const resumeSteps = Array.isArray(msg.steps) && msg.steps.length > 0
@@ -3104,7 +3109,37 @@
   }
 
   // --- Generating State ---
-  function startGenerating() {
+  function getGenerationElapsedMs() {
+    return generationStartedAt > 0 ? Math.max(0, Date.now() - generationStartedAt) : null;
+  }
+
+  function refreshGenerationElapsedTime() {
+    const bubble = document.querySelector('#streaming-msg .msg-bubble');
+    if (!bubble) return;
+    updateAssistantBubbleLayout(bubble, {
+      complete: false,
+      running: true,
+      elapsedMs: getGenerationElapsedMs(),
+    });
+  }
+
+  function stopGenerationElapsedTimer() {
+    if (generationElapsedTimer) clearInterval(generationElapsedTimer);
+    generationElapsedTimer = null;
+    generationStartedAt = 0;
+  }
+
+  function startGenerationElapsedTimer(startedAt) {
+    if (generationElapsedTimer) clearInterval(generationElapsedTimer);
+    const normalizedStartedAt = Number(startedAt);
+    generationStartedAt = Number.isFinite(normalizedStartedAt) && normalizedStartedAt > 0
+      ? normalizedStartedAt
+      : Date.now();
+    refreshGenerationElapsedTime();
+    generationElapsedTimer = setInterval(refreshGenerationElapsedTime, 1000);
+  }
+
+  function startGenerating(startedAt) {
     isGenerating = true;
     generationUsageResolved = false;
     setCurrentSessionRunningState(true);
@@ -3124,12 +3159,15 @@
     const bubble = msgEl.querySelector('.msg-bubble');
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
     messagesDiv.appendChild(msgEl);
+    startGenerationElapsedTimer(startedAt);
     showStreamingThinkingIndicator();
     updateContextUsageDisplay();
     syncLastUserResendAction();
   }
 
-  function finishGenerating(sessionId) {
+  function finishGenerating(sessionId, durationMs) {
+    const completedDurationMs = normalizeElapsedDuration(durationMs) ?? getGenerationElapsedMs();
+    stopGenerationElapsedTimer();
     isGenerating = false;
     sendBtn.hidden = false;
     abortBtn.hidden = true;
@@ -3140,11 +3178,20 @@
 
     if (pendingText) flushRender();
     finalizeActiveToolCalls(activeToolCalls, updateToolCall);
+    const completedSteps = buildLegacyAssistantSteps(
+      pendingText,
+      Array.from(activeToolCalls.values()).map((tool) => deepClone(tool)),
+    );
 
     const streamEl = document.getElementById('streaming-msg');
     if (streamEl) {
       removeTrailingEmptyAssistantTextStep(streamEl);
-      updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), { complete: true, running: false });
+      updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), {
+        complete: true,
+        running: false,
+        elapsedMs: completedDurationMs,
+      });
+      appendAssistantFileChanges(streamEl, completedSteps);
       streamEl.removeAttribute('id');
     }
 
@@ -3153,7 +3200,8 @@
       currentSessionMessages.push({
         role: 'assistant',
         content: pendingText,
-        steps: buildLegacyAssistantSteps(pendingText, Array.from(activeToolCalls.values()).map((tool) => deepClone(tool))),
+        steps: completedSteps,
+        durationMs: completedDurationMs,
       });
     }
     updateContextUsageDisplay();
@@ -3397,6 +3445,8 @@
     const process = ensureAssistantProcessContainer(bubble);
     const complete = options.complete === true;
     const running = options.running === true && !complete;
+    const elapsedMs = normalizeElapsedDuration(options.elapsedMs)
+      ?? (running ? getGenerationElapsedMs() : null);
 
     promoteProcessTextStepsToFinalIfNeeded(bubble, { complete, running, finalDiv, process });
 
@@ -3413,7 +3463,9 @@
         process.label.textContent = running ? '处理中' : (hasFinal ? '查看过程' : '过程');
       }
       if (process.meta) {
-        process.meta.textContent = `${processCount} 步`;
+        process.meta.textContent = elapsedMs === null
+          ? `${processCount} 步`
+          : `${processCount} 步 · 已运行：${formatElapsedDuration(elapsedMs)}`;
       }
       if (process.state) {
         process.state.textContent = running ? '运行中' : '已完成';
@@ -3635,7 +3687,7 @@
   function toolStateLabel(tool, done) {
     if (!done) return 'Running';
     if (toolKind(tool) === 'command_execution' && typeof tool?.meta?.exitCode === 'number') {
-      return `Exit ${tool.meta.exitCode}`;
+      return tool.meta.exitCode === 0 ? '' : `Exit ${tool.meta.exitCode}`;
     }
     return 'Done';
   }
@@ -3668,13 +3720,16 @@
       main.appendChild(subtitle);
     }
 
-    const state = document.createElement('span');
-    state.className = `tool-call-state ${toolStateClass(tool, done)}`;
-    state.textContent = toolStateLabel(tool, done);
+    const stateLabel = toolStateLabel(tool, done);
 
     summary.appendChild(icon);
     summary.appendChild(main);
-    summary.appendChild(state);
+    if (stateLabel) {
+      const state = document.createElement('span');
+      state.className = `tool-call-state ${toolStateClass(tool, done)}`;
+      state.textContent = stateLabel;
+      summary.appendChild(state);
+    }
   }
 
   function buildStructuredToolSection(labelText, bodyText) {
@@ -3730,6 +3785,119 @@
     return list;
   }
 
+  function buildAssistantFileChanges(changes) {
+    const initialVisibleCount = 3;
+    const section = document.createElement('section');
+    section.className = 'assistant-file-changes';
+
+    const header = document.createElement('header');
+    header.className = 'assistant-file-changes-header';
+    const icon = document.createElement('span');
+    icon.className = 'assistant-file-changes-icon';
+    icon.textContent = '⊞';
+    icon.setAttribute('aria-hidden', 'true');
+    const summary = document.createElement('div');
+    summary.className = 'assistant-file-changes-summary';
+    const title = document.createElement('div');
+    title.className = 'assistant-file-changes-title';
+    title.textContent = `已编辑 ${changes.length} 个文件`;
+    const totals = document.createElement('div');
+    totals.className = 'assistant-file-changes-totals';
+    const additions = changes.reduce((sum, change) => sum + (Number.isFinite(change.additions) ? change.additions : 0), 0);
+    const deletions = changes.reduce((sum, change) => sum + (Number.isFinite(change.deletions) ? change.deletions : 0), 0);
+    if (additions > 0) {
+      const value = document.createElement('span');
+      value.className = 'file-change-additions';
+      value.textContent = `+${additions}`;
+      totals.appendChild(value);
+    }
+    if (deletions > 0) {
+      const value = document.createElement('span');
+      value.className = 'file-change-deletions';
+      value.textContent = `-${deletions}`;
+      totals.appendChild(value);
+    }
+    summary.append(title, totals);
+    header.append(icon, summary);
+
+    const list = document.createElement('div');
+    list.className = 'assistant-file-change-list';
+    const rows = changes.map((change, index) => {
+      const row = document.createElement('div');
+      row.className = 'assistant-file-change-row';
+      row.title = change.path || '';
+      row.hidden = index >= initialVisibleCount;
+      const filePath = document.createElement('span');
+      filePath.className = 'assistant-file-change-path';
+      const displayPath = gitWorkspaceView.splitFileDisplayPath(change.path || '未知文件');
+      if (displayPath.directory) {
+        const directory = document.createElement('span');
+        directory.className = 'assistant-file-change-directory';
+        directory.textContent = displayPath.directory;
+        filePath.appendChild(directory);
+      }
+      const filename = document.createElement('strong');
+      filename.className = 'assistant-file-change-filename';
+      filename.textContent = displayPath.filename;
+      filePath.appendChild(filename);
+      const stats = document.createElement('span');
+      stats.className = 'file-change-stats';
+      if (Number.isFinite(change.additions)) {
+        const value = document.createElement('span');
+        value.className = 'file-change-additions';
+        value.textContent = `+${change.additions}`;
+        stats.appendChild(value);
+      }
+      if (Number.isFinite(change.deletions)) {
+        const value = document.createElement('span');
+        value.className = 'file-change-deletions';
+        value.textContent = `-${change.deletions}`;
+        stats.appendChild(value);
+      }
+      row.append(filePath, stats);
+      list.appendChild(row);
+      return row;
+    });
+
+    section.append(header, list);
+    if (changes.length > initialVisibleCount) {
+      const hiddenCount = changes.length - initialVisibleCount;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'assistant-file-changes-toggle';
+      const label = document.createElement('span');
+      const chevron = document.createElement('span');
+      chevron.className = 'assistant-file-changes-chevron';
+      chevron.textContent = '⌄';
+      let expanded = false;
+      const updateExpandedState = () => {
+        rows.forEach((row, index) => { row.hidden = !expanded && index >= initialVisibleCount; });
+        label.textContent = expanded ? '收起文件' : `再显示 ${hiddenCount} 个文件`;
+        toggle.classList.toggle('expanded', expanded);
+        toggle.setAttribute('aria-expanded', String(expanded));
+      };
+      toggle.append(label, chevron);
+      toggle.addEventListener('click', () => {
+        expanded = !expanded;
+        updateExpandedState();
+      });
+      updateExpandedState();
+      section.appendChild(toggle);
+    }
+    return section;
+  }
+
+  function appendAssistantFileChanges(messageEl, steps) {
+    if (!messageEl) return;
+    messageEl.querySelector('.assistant-file-changes')?.remove();
+    const changes = gitWorkspaceView.collectAssistantFileChanges(steps, currentCwd || '');
+    if (changes.length === 0) return;
+    const main = messageEl.querySelector('.msg-main');
+    if (!main) return;
+
+    main.appendChild(buildAssistantFileChanges(changes));
+  }
+
 	  function buildMsgElement(m, options = {}) {
 	    const { allowResend = false } = options;
 	    const resendPayload = allowResend && m.role === 'user'
@@ -3743,7 +3911,13 @@
 	    );
 	    if (m.role === 'assistant') {
 	      const bubble = el.querySelector('.msg-bubble');
-	      renderAssistantStepsIntoBubble(bubble, getAssistantMessageSteps(m), m.attachments || [], { complete: true, running: false });
+	      const steps = getAssistantMessageSteps(m);
+	      renderAssistantStepsIntoBubble(bubble, steps, m.attachments || [], {
+	        complete: true,
+	        running: false,
+	        elapsedMs: m.durationMs,
+	      });
+	      appendAssistantFileChanges(el, steps);
 	    }
 	    return el;
 	  }

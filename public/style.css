@@ -2031,6 +2031,93 @@ body.column-resizing * {
 }
 .file-change-additions { color: var(--success); }
 .file-change-deletions { color: var(--danger); }
+.assistant-file-changes {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+}
+.assistant-file-changes-header {
+  min-height: 62px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.assistant-file-changes-icon {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 21px;
+  line-height: 1;
+}
+.assistant-file-changes-summary {
+  min-width: 0;
+}
+.assistant-file-changes-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.assistant-file-changes-totals {
+  min-height: 16px;
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.assistant-file-change-list {
+  padding: 4px 0;
+}
+.assistant-file-change-row {
+  min-height: 36px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+}
+.assistant-file-change-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-file-change-directory {
+  font-weight: 400;
+}
+.assistant-file-change-filename {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.assistant-file-changes-toggle {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.assistant-file-changes-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+.assistant-file-changes-chevron {
+  display: inline-block;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.assistant-file-changes-toggle.expanded .assistant-file-changes-chevron {
+  transform: rotate(180deg);
+}
 
 /* Tool group (auto-fold) */
 .tool-group {

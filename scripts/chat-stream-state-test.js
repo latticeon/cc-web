@@ -1,5 +1,17 @@
 const assert = require('assert');
-const { finalizeActiveToolCalls } = require('../public/chat-stream-state');
+const {
+  finalizeActiveToolCalls,
+  normalizeElapsedDuration,
+  formatElapsedDuration,
+} = require('../public/chat-stream-state');
+
+assert.strictEqual(normalizeElapsedDuration(-1), null);
+assert.strictEqual(normalizeElapsedDuration(null), null);
+assert.strictEqual(normalizeElapsedDuration(''), null);
+assert.strictEqual(normalizeElapsedDuration('1234.9'), 1234);
+assert.strictEqual(formatElapsedDuration(0), '00:00:00');
+assert.strictEqual(formatElapsedDuration(3723000), '01:02:03');
+assert.strictEqual(formatElapsedDuration(90061000), '25:01:01');
 const { createAgentRuntime } = require('../lib/agent-runtime');
 
 const pendingResult = { output: 'command completed' };

@@ -1794,6 +1794,10 @@ function mergeAssistantMessage(target, incoming) {
     target.timestamp = incoming.timestamp;
     changed = true;
   }
+  if (!Number.isFinite(target.durationMs) && Number.isFinite(incoming.durationMs)) {
+    target.durationMs = incoming.durationMs;
+    changed = true;
+  }
   return changed;
 }
 
@@ -1997,6 +2001,9 @@ function mergeSequentialAssistantMessage(target, incoming) {
       target.steps.push(...incoming.steps);
     }
   }
+  if (Number.isFinite(incoming.durationMs)) {
+    target.durationMs = (Number.isFinite(target.durationMs) ? target.durationMs : 0) + incoming.durationMs;
+  }
 }
 
 function upsertTrailingAssistantMessage(session, message) {
@@ -2009,6 +2016,7 @@ function upsertTrailingAssistantMessage(session, message) {
     toolCalls: Array.isArray(message?.toolCalls) ? message.toolCalls : [],
     steps: Array.isArray(message?.steps) ? message.steps : [],
     timestamp: message?.timestamp || new Date().toISOString(),
+    durationMs: Number.isFinite(message?.durationMs) ? Math.max(0, Math.floor(message.durationMs)) : null,
   };
   if (!normalizeAssistantContent(incoming.content) && incoming.steps.length === 0 && incoming.toolCalls.length === 0) {
     return { changed: false, appended: false };
@@ -2215,6 +2223,7 @@ function readRunProcessMeta(dir) {
       agent: normalizeAgent(meta?.agent || ''),
       runtimeId: String(meta?.runtimeId || '').trim() || null,
       processStartMarker: normalizeProcessStartMarker(meta?.processStartMarker),
+      startedAt: Number(meta?.startedAt) || Date.parse(meta?.capturedAt) || Date.now(),
     };
   } catch {
     return null;
@@ -2228,6 +2237,7 @@ function writeRunProcessMeta(dir, meta) {
       agent: normalizeAgent(meta?.agent || ''),
       runtimeId: String(meta?.runtimeId || '').trim() || null,
       processStartMarker: normalizeProcessStartMarker(meta?.processStartMarker),
+      startedAt: Number(meta?.startedAt) || Date.now(),
       capturedAt: new Date().toISOString(),
     }, null, 2));
   } catch {}
@@ -2865,6 +2875,7 @@ function isContextLimitError(agent, raw) {
 function handleProcessComplete(sessionId, exitCode, signal) {
   const entry = activeProcesses.get(sessionId);
   if (!entry) return;
+  const durationMs = Math.max(0, Date.now() - (Number(entry.startedAt) || Date.now()));
   if (entry.protocolExitTimer) {
     clearTimeout(entry.protocolExitTimer);
     entry.protocolExitTimer = null;
@@ -2966,6 +2977,7 @@ function handleProcessComplete(sessionId, exitCode, signal) {
       toolCalls: entry.toolCalls || [],
       steps: entry.assistantSteps || [],
       timestamp: new Date().toISOString(),
+      durationMs,
     });
     if (saved.changed) {
       if (saved.appended) {
@@ -3024,7 +3036,7 @@ function handleProcessComplete(sessionId, exitCode, signal) {
     if (hydratedModelChanged && session?.model) {
       wsSend(entry.ws, { type: 'model_changed', model: sessionModelLabel(session) });
     }
-    wsSend(entry.ws, { type: 'done', sessionId, costUsd: entry.lastCost || null });
+    wsSend(entry.ws, { type: 'done', sessionId, costUsd: entry.lastCost || null, durationMs });
     sendSessionList(entry.ws);
     // Push notification when trigger='always' (user online but still wants notification)
     (() => {
@@ -3169,6 +3181,7 @@ function recoverProcesses() {
           agent,
           runtimeId: trackedEntry.runtimeId,
           processStartMarker: trackedEntry.processStartMarker,
+          startedAt: processMeta.startedAt,
           identityCheck: true,
           fullText: '',
           toolCalls: [],
@@ -4595,6 +4608,7 @@ function handleLoadSession(ws, sessionId) {
     wsSend(ws, {
       type: 'resume_generating',
       sessionId,
+      startedAt: entry.startedAt,
       text: entry.fullText || '',
       toolCalls: entry.toolCalls || [],
       steps: entry.assistantSteps || [],
@@ -4883,6 +4897,8 @@ function handleMessage(ws, msg, options = {}) {
     return wsSend(ws, { type: 'error', message: '正在处理中，请先点击停止按钮。' });
   }
 
+  const requestStartedAt = Date.now();
+
   const derivedTitle = normalizedText
     ? textValue.slice(0, 60).replace(/\n/g, ' ')
     : `图片: ${savedAttachments[0]?.filename || 'image'}`;
@@ -5075,7 +5091,12 @@ function handleMessage(ws, msg, options = {}) {
       type: 'error',
       message: formatRuntimeError(agent, err?.message || 'Unknown spawn error', { exitCode: null, signal: null }),
     });
-    wsSend(ws, { type: 'done', sessionId: currentSessionId, costUsd: null });
+    wsSend(ws, {
+      type: 'done',
+      sessionId: currentSessionId,
+      costUsd: null,
+      durationMs: Math.max(0, Date.now() - requestStartedAt),
+    });
     sendSessionList(ws);
   }
 
@@ -5126,6 +5147,7 @@ function handleMessage(ws, msg, options = {}) {
     agent: getSessionAgent(session),
     runtimeId,
     processStartMarker,
+    startedAt: requestStartedAt,
   });
   proc.unref(); // Process survives Node.js exit
 
@@ -5164,6 +5186,7 @@ function handleMessage(ws, msg, options = {}) {
     agent: getSessionAgent(session),
     runtimeId,
     processStartMarker,
+    startedAt: requestStartedAt,
     identityCheck: false,
     cwd: spawnSpec.cwd,
     fullText: '',

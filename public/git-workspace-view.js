@@ -78,6 +78,46 @@
     return content;
   }
 
+  function getWorkspaceRelativePath(filePath, workspaceRoot) {
+    const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '');
+    const normalizedRoot = String(workspaceRoot || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!normalizedRoot) return normalizedPath;
+    const caseInsensitive = /^[a-z]:\//i.test(normalizedRoot) || normalizedRoot.startsWith('//');
+    const comparablePath = caseInsensitive ? normalizedPath.toLowerCase() : normalizedPath;
+    const comparableRoot = caseInsensitive ? normalizedRoot.toLowerCase() : normalizedRoot;
+    return comparablePath.startsWith(`${comparableRoot}/`)
+      ? normalizedPath.slice(normalizedRoot.length + 1)
+      : normalizedPath;
+  }
+
+  function splitFileDisplayPath(filePath) {
+    const displayPath = String(filePath || '');
+    const separatorIndex = Math.max(displayPath.lastIndexOf('/'), displayPath.lastIndexOf('\\'));
+    if (separatorIndex < 0) return { directory: '', filename: displayPath };
+    return {
+      directory: displayPath.slice(0, separatorIndex + 1),
+      filename: displayPath.slice(separatorIndex + 1),
+    };
+  }
+
+  function collectAssistantFileChanges(steps, workspaceRoot = '') {
+    const changesByPath = new Map();
+    (Array.isArray(steps) ? steps : []).forEach((step) => {
+      if (!step || step.type !== 'tool_call') return;
+      const kind = step.kind || step.meta?.kind || '';
+      if (kind !== 'file_change' || !Array.isArray(step.meta?.changes)) return;
+      step.meta.changes.forEach((change) => {
+        const filePath = String(change?.path || '').trim();
+        if (!filePath) return;
+        const displayPath = getWorkspaceRelativePath(filePath, workspaceRoot);
+        const caseInsensitive = /^[a-z]:[\\/]/i.test(workspaceRoot) || String(workspaceRoot).startsWith('\\\\');
+        const key = caseInsensitive ? displayPath.toLowerCase() : displayPath;
+        changesByPath.set(key, { ...(changesByPath.get(key) || {}), ...change, path: displayPath });
+      });
+    });
+    return Array.from(changesByPath.values());
+  }
+
   function createHistoryList(doc, commits, formatRelativeTime) {
     const list = doc.createElement('div');
     list.className = 'git-history-list';
@@ -108,8 +148,11 @@
   }
 
   return {
+    collectAssistantFileChanges,
     createDiffContent,
     createHistoryList,
     parseUnifiedDiff,
+    getWorkspaceRelativePath,
+    splitFileDisplayPath,
   };
 });

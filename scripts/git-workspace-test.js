@@ -4,7 +4,30 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { readGitFileDiff, readGitHistory } = require('../lib/git-workspace');
-const { parseUnifiedDiff } = require('../public/git-workspace-view');
+const {
+  collectAssistantFileChanges,
+  getWorkspaceRelativePath,
+  parseUnifiedDiff,
+  splitFileDisplayPath,
+} = require('../public/git-workspace-view');
+
+assert.strictEqual(getWorkspaceRelativePath('C:\\workspace\\demo\\lib\\runtime.js', 'C:\\workspace\\demo'), 'lib/runtime.js');
+assert.strictEqual(getWorkspaceRelativePath('/srv/demo/src/app.js', '/srv/demo'), 'src/app.js');
+assert.strictEqual(getWorkspaceRelativePath('/srv/other/app.js', '/srv/demo'), '/srv/other/app.js');
+assert.deepStrictEqual(splitFileDisplayPath('src/components/app.js'), { directory: 'src/components/', filename: 'app.js' });
+assert.deepStrictEqual(splitFileDisplayPath('src\\components\\app.js'), { directory: 'src\\components\\', filename: 'app.js' });
+assert.deepStrictEqual(splitFileDisplayPath('README.md'), { directory: '', filename: 'README.md' });
+
+const responseChanges = collectAssistantFileChanges([
+  { type: 'tool_call', kind: 'command_execution', meta: { changes: [{ path: 'ignored.txt' }] } },
+  { type: 'tool_call', kind: 'file_change', meta: { changes: [{ path: 'C:\\workspace\\demo\\src\\app.js', kind: 'update', additions: 2 }] } },
+  { type: 'tool_call', meta: { kind: 'file_change', changes: [{ path: 'src\\app.js', kind: 'update', additions: 3 }] } },
+  { type: 'tool_call', kind: 'file_change', meta: { changes: [{ path: 'README.md', kind: 'create' }] } },
+], 'C:\\workspace\\demo');
+assert.deepStrictEqual(responseChanges, [
+  { path: 'src/app.js', kind: 'update', additions: 3 },
+  { path: 'README.md', kind: 'create' },
+]);
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-web-git-workspace-'));
 

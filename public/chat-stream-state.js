@@ -16,5 +16,20 @@
     return finalizedCount;
   }
 
-  return { finalizeActiveToolCalls };
+  function normalizeElapsedDuration(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const duration = Number(value);
+    return Number.isFinite(duration) && duration >= 0 ? Math.floor(duration) : null;
+  }
+
+  function formatElapsedDuration(value) {
+    const duration = normalizeElapsedDuration(value) || 0;
+    const totalSeconds = Math.floor(duration / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
+  }
+
+  return { finalizeActiveToolCalls, normalizeElapsedDuration, formatElapsedDuration };
 });
