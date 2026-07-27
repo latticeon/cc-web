@@ -2510,6 +2510,18 @@
     setSessionLoading(null, { blocking: false });
   }
 
+  function releaseSessionLoadingOverlay(sessionId) {
+    if (!activeSessionLoad || activeSessionLoad.sessionId !== sessionId) return;
+    activeSessionLoad.blocking = false;
+    document.body.classList.remove('session-loading-active');
+    sessionLoadingOverlay.hidden = true;
+    sessionLoadingOverlay.setAttribute('aria-hidden', 'true');
+    msgInput.disabled = false;
+    modeSelect.disabled = false;
+    sendBtn.disabled = false;
+    abortBtn.disabled = false;
+  }
+
   function isBlockingSessionLoad(sessionId) {
     return !!(activeSessionLoad &&
       activeSessionLoad.blocking &&
@@ -2900,6 +2912,7 @@
             finishSessionSwitch(msg.sessionId);
           }
         } else {
+          releaseSessionLoadingOverlay(msg.sessionId);
           renderHistoryLoader();
           requestAnimationFrame(maybeLoadMoreHistory);
         }
