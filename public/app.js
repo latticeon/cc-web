@@ -4,6 +4,8 @@
 
   const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   const RENDER_DEBOUNCE = 100;
+  const MAX_RENDERED_MESSAGES = 80;
+  const LOCAL_HISTORY_CHUNK_SIZE = 24;
   const gitWorkspaceView = window.CcGitWorkspaceView;
   const { finalizeActiveToolCalls, normalizeElapsedDuration, formatElapsedDuration } = window.CcChatStreamState;
   const splitLayoutView = window.CcSplitLayout;
@@ -278,6 +280,7 @@
   let pendingAgentModelRequests = new Map();
   let agentModelRequestSeq = 0;
   let isGenerating = false;
+  let generationKind = 'response';
   let currentContextTokens = 0;
   let generationUsageResolved = false;
   let reconnectAttempts = 0;
@@ -296,6 +299,9 @@
   let codexConfigCache = null;
   let codebuddyConfigCache = null;
   let loadedHistorySessionId = null;
+  let historyLoadState = { sessionId: null, loading: false, hasMore: false };
+  let renderedMessageStart = 0;
+  let localHistoryLoading = false;
   let activeSessionLoad = null;
   let sidebarSwipe = null;
   let pendingAttachments = [];
@@ -2371,6 +2377,9 @@
     currentContextTokens = 0;
     generationUsageResolved = false;
     loadedHistorySessionId = null;
+    historyLoadState = { sessionId: null, loading: false, hasMore: false };
+    renderedMessageStart = 0;
+    localHistoryLoading = false;
     clearSessionLoading();
     setCurrentSessionRunningState(false);
     currentCwd = null;
@@ -2409,6 +2418,10 @@
     }
     currentSessionId = snapshot.sessionId;
     loadedHistorySessionId = snapshot.sessionId;
+    if (snapshot.complete) {
+      historyLoadState = { sessionId: snapshot.sessionId, loading: false, hasMore: false };
+      messagesDiv.querySelector('.history-loader')?.remove();
+    }
     setLastSessionForAgent(snapshot.agent, currentSessionId);
     chatTitle.textContent = snapshot.title || '新会话';
     setCurrentAgent(snapshot.agent);
@@ -2513,11 +2526,84 @@
   }
 
   function finalizeLoadedSession(sessionId) {
+    historyLoadState = { sessionId, loading: false, hasMore: false };
+    messagesDiv.querySelector('.history-loader')?.remove();
     if (activeSessionLoad?.sessionId === sessionId && activeSessionLoad.snapshot) {
       activeSessionLoad.snapshot.complete = true;
       cacheSessionSnapshot(activeSessionLoad.snapshot);
     }
     finishSessionSwitch(sessionId);
+  }
+
+  function renderHistoryLoader() {
+    let loader = messagesDiv.querySelector('.history-loader');
+    const hasMore = historyLoadState.hasMore || renderedMessageStart > 0;
+    if (!hasMore) {
+      loader?.remove();
+      return;
+    }
+    if (!loader) {
+      loader = document.createElement('div');
+      loader.className = 'history-loader';
+      messagesDiv.insertBefore(loader, messagesDiv.firstChild);
+    }
+    loader.textContent = historyLoadState.loading || localHistoryLoading
+      ? '正在加载更早的消息…'
+      : '向上滚动加载更早的消息';
+  }
+
+  function requestMoreHistory() {
+    if (!currentSessionId || loadedHistorySessionId !== currentSessionId) return;
+    if (!historyLoadState.hasMore || historyLoadState.loading) return;
+    historyLoadState.loading = true;
+    renderHistoryLoader();
+    send({ type: 'load_session_history', sessionId: currentSessionId });
+  }
+
+  function maybeLoadMoreHistory() {
+    if ((!historyLoadState.hasMore || historyLoadState.loading) && renderedMessageStart <= 0) return;
+    if (messagesDiv.scrollTop <= 120 || messagesDiv.scrollHeight <= messagesDiv.clientHeight + 120) {
+      if (historyLoadState.hasMore) requestMoreHistory();
+      else loadEarlierRenderedMessages();
+    }
+  }
+
+  function trimRenderedMessages() {
+    const nodes = Array.from(messagesDiv.querySelectorAll('.msg'));
+    const maxNodes = MAX_RENDERED_MESSAGES + (document.getElementById('streaming-msg') ? 1 : 0);
+    while (nodes.length > maxNodes) {
+      const node = nodes.shift();
+      if (!node || node.id === 'streaming-msg') break;
+      node.remove();
+      renderedMessageStart += 1;
+    }
+    renderHistoryLoader();
+  }
+
+  function loadEarlierRenderedMessages() {
+    if (renderedMessageStart <= 0 || localHistoryLoading) return;
+    localHistoryLoading = true;
+    renderHistoryLoader();
+    requestAnimationFrame(() => {
+      const end = renderedMessageStart;
+      const start = Math.max(0, end - LOCAL_HISTORY_CHUNK_SIZE);
+      const frag = document.createDocumentFragment();
+      for (let index = start; index < end; index += 1) {
+        frag.appendChild(buildMsgElement(currentSessionMessages[index], {
+          allowResend: index === currentSessionMessages.length - 1,
+        }));
+      }
+      const previousHeight = messagesDiv.scrollHeight;
+      const previousScrollTop = messagesDiv.scrollTop;
+      const loader = messagesDiv.querySelector('.history-loader');
+      messagesDiv.insertBefore(frag, loader?.nextSibling || messagesDiv.firstChild);
+      renderedMessageStart = start;
+      localHistoryLoading = false;
+      messagesDiv.scrollTop = previousScrollTop + (messagesDiv.scrollHeight - previousHeight);
+      renderHistoryLoader();
+      syncLastUserResendAction();
+      updateScrollbar();
+    });
   }
 
   function beginSessionSwitch(sessionId, options = {}) {
@@ -2528,6 +2614,9 @@
     if (!force && sessionId === currentSessionId && !activeSessionLoad) return;
     renderEpoch++;
     loadedHistorySessionId = null;
+    historyLoadState = { sessionId: null, loading: false, hasMore: false };
+    renderedMessageStart = 0;
+    localHistoryLoading = false;
     setSessionLoading(sessionId, { blocking, label: options.label });
     send({ type: 'load_session', sessionId });
   }
@@ -2789,6 +2878,11 @@
         break;
 
       case 'session_info':
+        historyLoadState = {
+          sessionId: msg.sessionId,
+          loading: false,
+          hasMore: !!msg.historyPending,
+        };
         const snapshot = normalizeSessionSnapshot(msg);
         if (activeSessionLoad?.sessionId === msg.sessionId) {
           activeSessionLoad.snapshot = snapshot;
@@ -2805,11 +2899,16 @@
             cacheSessionSnapshot(snapshot);
             finishSessionSwitch(msg.sessionId);
           }
+        } else {
+          renderHistoryLoader();
+          requestAnimationFrame(maybeLoadMoreHistory);
         }
         break;
 
       case 'session_history_chunk':
         if (msg.sessionId === currentSessionId && loadedHistorySessionId === msg.sessionId) {
+          historyLoadState.loading = false;
+          historyLoadState.hasMore = Number(msg.remaining) > 0;
           const blocking = isBlockingSessionLoad(msg.sessionId);
           if (activeSessionLoad?.sessionId === msg.sessionId && activeSessionLoad.snapshot) {
             activeSessionLoad.snapshot.messages = cloneMessages(msg.messages || []).concat(activeSessionLoad.snapshot.messages);
@@ -2820,6 +2919,9 @@
           });
           if (!msg.remaining) {
             finalizeLoadedSession(msg.sessionId);
+          } else {
+            renderHistoryLoader();
+            requestAnimationFrame(maybeLoadMoreHistory);
           }
         }
         break;
@@ -2857,6 +2959,13 @@
         }
         updateToolCall(msg.toolUseId, msg.result);
         showStreamingThinkingIndicator();
+        break;
+
+      case 'generation_state':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
+        if (msg.state === 'compacting') {
+          startGenerating(msg.startedAt, 'compacting');
+        }
         break;
 
       case 'cost':
@@ -2939,9 +3048,11 @@
       case 'resume_generating':
         // Server has an active process for this session — resume streaming
         setCurrentSessionRunningState(true);
+        const resumeKind = msg.kind === 'compacting' ? 'compacting' : 'response';
         if (!isGenerating || !document.getElementById('streaming-msg')) {
-          startGenerating(msg.startedAt);
+          startGenerating(msg.startedAt, resumeKind);
         } else {
+          generationKind = resumeKind;
           sendBtn.hidden = true;
           abortBtn.hidden = false;
           activeToolCalls.clear();
@@ -3139,8 +3250,9 @@
     generationElapsedTimer = setInterval(refreshGenerationElapsedTime, 1000);
   }
 
-  function startGenerating(startedAt) {
+  function startGenerating(startedAt, kind = 'response') {
     isGenerating = true;
+    generationKind = kind === 'compacting' ? 'compacting' : 'response';
     generationUsageResolved = false;
     setCurrentSessionRunningState(true);
     pendingText = '';
@@ -3169,6 +3281,7 @@
     const completedDurationMs = normalizeElapsedDuration(durationMs) ?? getGenerationElapsedMs();
     stopGenerationElapsedTimer();
     isGenerating = false;
+    generationKind = 'response';
     sendBtn.hidden = false;
     abortBtn.hidden = true;
     abortBtn.disabled = false;
@@ -3182,6 +3295,7 @@
       pendingText,
       Array.from(activeToolCalls.values()).map((tool) => deepClone(tool)),
     );
+    const hasAssistantOutput = !!(pendingText.trim() || activeToolCalls.size > 0);
 
     const streamEl = document.getElementById('streaming-msg');
     if (streamEl) {
@@ -3192,11 +3306,12 @@
         elapsedMs: completedDurationMs,
       });
       appendAssistantFileChanges(streamEl, completedSteps);
-      streamEl.removeAttribute('id');
+      if (hasAssistantOutput) streamEl.removeAttribute('id');
+      else streamEl.remove();
     }
 
     if (sessionId) currentSessionId = sessionId;
-    if (pendingText.trim() || activeToolCalls.size > 0) {
+    if (hasAssistantOutput) {
       currentSessionMessages.push({
         role: 'assistant',
         content: pendingText,
@@ -3204,6 +3319,7 @@
         durationMs: completedDurationMs,
       });
     }
+    trimRenderedMessages();
     updateContextUsageDisplay();
     pendingText = '';
     activeToolCalls.clear();
@@ -3231,7 +3347,10 @@
   }
 
   function renderMarkdown(text) {
-    if (!text) return '<div class="typing-indicator" data-text="正在思考" role="status">正在思考</div>';
+    if (!text) {
+      const label = generationKind === 'compacting' ? '正在压缩上下文' : '正在思考';
+      return `<div class="typing-indicator" data-text="${label}" role="status">${label}</div>`;
+    }
     try { return marked.parse(text); }
     catch { return escapeHtml(text); }
   }
@@ -3460,7 +3579,9 @@
 
     if (hasProcess) {
       if (process.label) {
-        process.label.textContent = running ? '处理中' : (hasFinal ? '查看过程' : '过程');
+        process.label.textContent = running
+          ? (generationKind === 'compacting' ? '压缩上下文' : '处理中')
+          : (hasFinal ? '查看过程' : '过程');
       }
       if (process.meta) {
         process.meta.textContent = elapsedMs === null
@@ -3468,7 +3589,9 @@
           : `${processCount} 步 · 已运行：${formatElapsedDuration(elapsedMs)}`;
       }
       if (process.state) {
-        process.state.textContent = running ? '运行中' : '已完成';
+        process.state.textContent = running
+          ? (generationKind === 'compacting' ? '压缩中' : '运行中')
+          : '已完成';
       }
       process.details.open = running || !hasFinal;
     } else {
@@ -3582,6 +3705,7 @@
     const nextPayload = { text, attachments: cloneResendAttachments(attachments) };
     messagesDiv.appendChild(createMsgElement('user', text, attachments, { resendPayload: nextPayload }));
     currentSessionMessages.push({ role: 'user', content: text, attachments: cloneResendAttachments(attachments) });
+    trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
@@ -3924,6 +4048,8 @@
 
   function renderMessages(messages, options = {}) {
     currentSessionMessages = cloneMessages(messages || []);
+    renderedMessageStart = 0;
+    localHistoryLoading = false;
     renderEpoch++;
     const epoch = renderEpoch;
     messagesDiv.innerHTML = '';
@@ -3937,6 +4063,7 @@
       const frag = document.createDocumentFragment();
       messages.forEach((message, index) => frag.appendChild(buildMsgElement(message, { allowResend: index === messages.length - 1 })));
       messagesDiv.appendChild(frag);
+      trimRenderedMessages();
       syncLastUserResendAction();
       updateContextUsageDisplay();
       scrollToBottom();
@@ -3993,17 +4120,19 @@
     const skipScrollbar = options.skipScrollbar === true;
     const welcome = messagesDiv.querySelector('.welcome-msg');
     if (welcome) welcome.remove();
+    const loader = messagesDiv.querySelector('.history-loader');
     const frag = document.createDocumentFragment();
     messages.forEach((m) => frag.appendChild(buildMsgElement(m)));
+    const insertBefore = loader?.nextSibling || messagesDiv.firstChild;
     if (!preserveScroll) {
-      messagesDiv.insertBefore(frag, messagesDiv.firstChild);
+      messagesDiv.insertBefore(frag, insertBefore);
       syncLastUserResendAction();
       if (!skipScrollbar) updateScrollbar();
       return;
     }
     const prevHeight = messagesDiv.scrollHeight;
     const prevScrollTop = messagesDiv.scrollTop;
-    messagesDiv.insertBefore(frag, messagesDiv.firstChild);
+    messagesDiv.insertBefore(frag, insertBefore);
     messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
     syncLastUserResendAction();
     if (!skipScrollbar) updateScrollbar();
@@ -4397,6 +4526,7 @@
     if (welcome) welcome.remove();
     messagesDiv.appendChild(createMsgElement('system', message));
     currentSessionMessages.push({ role: 'system', content: message });
+    trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
@@ -4408,6 +4538,7 @@
     div.innerHTML = `<div class="msg-bubble" style="border-color:var(--danger);color:var(--danger)">⚠ ${escapeHtml(message)}</div>`;
     messagesDiv.appendChild(div);
     currentSessionMessages.push({ role: 'system', content: `⚠ ${message}` });
+    trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();
@@ -4441,6 +4572,7 @@
 
   messagesDiv.addEventListener('scroll', () => {
     updateScrollbar();
+    maybeLoadMoreHistory();
     // 移动端：滚动时短暂显示滑块，停止后淡出
     scrollbarEl.classList.add('scrolling');
     clearTimeout(scrollbarEl._hideTimer);
@@ -5043,6 +5175,7 @@
       resendPayload: { text, attachments: cloneResendAttachments(attachments) },
     }));
     currentSessionMessages.push({ role: 'user', content: text, attachments: cloneResendAttachments(attachments) });
+    trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
     scrollToBottom();

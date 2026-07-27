@@ -3086,6 +3086,7 @@ function handleProcessComplete(sessionId, exitCode, signal) {
 
   if (shouldAutoCompact && entry.ws && entry.ws.readyState === 1 && session) {
     pendingSlashCommands.set(sessionId, { kind: 'compact' });
+    wsSend(entry.ws, { type: 'generation_state', state: 'compacting', sessionId, startedAt: Date.now() });
     handleMessage(entry.ws, { text: '/compact', sessionId, mode: session.permissionMode || 'yolo' }, { hideInHistory: true });
     return;
   }
@@ -3369,6 +3370,7 @@ const server = http.createServer((req, res) => {
 
 // === WebSocket Server ===
 const wss = new WebSocketServer({ server });
+const historyLoadStates = new WeakMap();
 
 let startupErrorHandled = false;
 function handleStartupError(error, source = 'server') {
@@ -3469,6 +3471,9 @@ wss.on('connection', (ws, req) => {
         break;
       case 'load_session':
         handleLoadSession(ws, msg.sessionId);
+        break;
+      case 'load_session_history':
+        handleLoadSessionHistory(ws, msg.sessionId);
         break;
       case 'delete_session':
         handleDeleteSession(ws, msg.sessionId);
@@ -4280,6 +4285,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
     }
 
       wsSend(ws, { type: 'system_message', message: compactStartMessage(agent) });
+      wsSend(ws, { type: 'generation_state', state: 'compacting', sessionId: session.id, startedAt: Date.now() });
       pendingSlashCommands.set(session.id, { kind: 'compact' });
       handleMessage(ws, { text: '/compact', sessionId: session.id, mode: session.permissionMode || 'yolo' }, { hideInHistory: true });
       break;
@@ -4546,6 +4552,11 @@ function handleLoadSession(ws, sessionId) {
     }
   }
   const { recentMessages, olderChunks } = splitHistoryMessages(session.messages);
+  historyLoadStates.set(ws, {
+    sessionId: session.id,
+    chunks: olderChunks,
+    nextIndex: 0,
+  });
   const effectiveCwd = session.cwd || activeProcesses.get(sessionId)?.cwd || null;
 
   // Detach ws from any previous session's process
@@ -4584,22 +4595,11 @@ function handleLoadSession(ws, sessionId) {
     remoteCwd: session.remoteCwd || '',
   });
 
-  if (olderChunks.length > 0) {
-    olderChunks.forEach((chunk, index) => {
-      wsSend(ws, {
-        type: 'session_history_chunk',
-        sessionId: session.id,
-        messages: chunk,
-        remaining: Math.max(0, olderChunks.length - index - 1),
-      });
-    });
-  }
-
   // Resume streaming if process is still active
   if (activeProcesses.has(sessionId)) {
     const entry = activeProcesses.get(sessionId);
     entry.ws = ws;
-    entry.wsDisconnectTime = null; // clear disconnect marker
+    entry.wsDisconnectTime = null;
     plog('INFO', 'ws_resume_attach', {
       sessionId: sessionId.slice(0, 8),
       pid: entry.pid,
@@ -4609,11 +4609,27 @@ function handleLoadSession(ws, sessionId) {
       type: 'resume_generating',
       sessionId,
       startedAt: entry.startedAt,
+      kind: pendingSlashCommands.get(sessionId)?.kind === 'compact' ? 'compacting' : 'response',
       text: entry.fullText || '',
       toolCalls: entry.toolCalls || [],
       steps: entry.assistantSteps || [],
     });
   }
+}
+
+function handleLoadSessionHistory(ws, sessionId) {
+  const state = historyLoadStates.get(ws);
+  if (!state || state.sessionId !== sessionId) return;
+  const chunk = state.chunks[state.nextIndex];
+  if (!chunk) return;
+  state.nextIndex += 1;
+  wsSend(ws, {
+    type: 'session_history_chunk',
+    sessionId,
+    messages: chunk,
+    remaining: Math.max(0, state.chunks.length - state.nextIndex),
+  });
+  if (state.nextIndex >= state.chunks.length) historyLoadStates.delete(ws);
 }
 
 function sqlQuote(value) {

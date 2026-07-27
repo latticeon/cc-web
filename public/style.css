@@ -1220,6 +1220,15 @@ body.column-resizing * {
   scrollbar-width: none;
 }
 .messages::-webkit-scrollbar { display: none; }
+.history-loader {
+  flex: 0 0 auto;
+  order: -1;
+  min-height: 24px;
+  padding: 2px 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
 /* Custom scrollbar */
 .custom-scrollbar {
   position: absolute;
