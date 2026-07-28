@@ -2891,13 +2891,11 @@ function handleProcessComplete(sessionId, exitCode, signal) {
   let contextLimitExceeded = false;
 
   const diagnostics = collectRuntimeFailureDiagnostics(sessionId, entry);
+  const processFailed = (typeof exitCode === 'number' && exitCode !== 0)
+    || (!!signal && signal !== 'SIGTERM');
   const rawCompletionError = entry.lastError
     ? (diagnostics.primaryRawError || condenseRuntimeError(entry.lastError))
-    : (
-        ((typeof exitCode === 'number' && exitCode !== 0) || (!!signal && signal !== 'SIGTERM'))
-          ? (diagnostics.primaryRawError || null)
-          : null
-      );
+    : (!entry.protocolComplete && processFailed ? (diagnostics.primaryRawError || null) : null);
   contextLimitExceeded = isContextLimitError(
     entry.agent || 'claude',
     `${entry.fullText || ''}\n${diagnostics.stderrSnippet || ''}\n${diagnostics.stdoutSnippet || ''}\n${rawCompletionError || ''}`

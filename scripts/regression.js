@@ -403,6 +403,12 @@ async function main() {
     await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codexSession.sessionId, 2500);
     assert(Date.now() - protocolCompleteStartedAt < 2500, 'Codex protocol completion should not wait for the CLI process to exit on its own');
 
+    const failedToolMessageStart = messages.length;
+    ws.send(JSON.stringify({ type: 'message', text: 'complete with failed tool', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
+    await nextMessage(messages, ws, (msg) => msg.type === 'done' && msg.sessionId === codexSession.sessionId);
+    const failedToolMessages = messages.slice(failedToolMessageStart);
+    assert(!failedToolMessages.some((msg) => msg.type === 'error'), 'Codex completed turn should ignore failed tool stderr and process exit code');
+
     ws.send(JSON.stringify({ type: 'message', text: '/model gpt-5.6-luna(low)', sessionId: codexSession.sessionId, mode: 'plan', agent: 'codex' }));
     const codexModelChanged = await nextMessage(messages, ws, (msg) => msg.type === 'model_changed' && msg.model === 'gpt-5.6-luna(low)');
     assert(codexModelChanged.model === 'gpt-5.6-luna(low)', 'Codex /model should accept model names with reasoning effort');

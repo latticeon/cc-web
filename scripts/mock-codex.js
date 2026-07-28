@@ -112,6 +112,11 @@ function readStdin() {
     usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 5 },
   })}\n`);
 
+  if (input === 'complete with failed tool') {
+    process.stderr.write('73:49 error Unexpected any. Specify a different type @typescript-eslint/no-explicit-any\n');
+    process.exitCode = 1;
+  }
+
   if (input === 'complete then linger') {
     setInterval(() => {}, 1000);
   }
