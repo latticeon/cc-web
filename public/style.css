@@ -2599,6 +2599,9 @@ body.column-resizing * {
   line-height: 18px;
   text-align: center;
 }
+.git-panel-overlay {
+  display: none;
+}
 .git-panel {
   width: var(--git-panel-width);
   min-width: var(--git-panel-width);
@@ -3203,10 +3206,17 @@ body.column-resizing * {
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(88vw, 340px);
+    width: min(84vw, 320px);
     min-width: 0;
     height: 100%;
     box-shadow: -12px 0 30px rgba(45, 31, 20, 0.16);
+  }
+  .git-panel-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 109;
+    display: block;
+    background: rgba(45, 31, 20, 0.3);
   }
   .sidebar {
     position: fixed;

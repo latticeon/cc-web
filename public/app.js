@@ -380,6 +380,7 @@
   const gitChangesBtn = $('#git-changes-btn');
   const gitChangesCount = $('#git-changes-count');
   const gitPanel = $('#git-panel');
+  const gitPanelOverlay = $('#git-panel-overlay');
   const gitPanelResizer = $('#git-panel-resizer');
   const gitPanelBody = $('#git-panel-body');
   const gitPanelTitle = $('#git-panel-title');
@@ -775,6 +776,7 @@
   function setGitPanelOpen(open, options = {}) {
     gitPanelOpen = !!open;
     gitPanel.hidden = !gitPanelOpen;
+    gitPanelOverlay.hidden = !gitPanelOpen || desktopLayoutQuery.matches;
     splitLayout.setRightPanelOpen(gitPanelOpen);
     if (options.remember !== false) splitLayout.rememberRightPanelOpen(gitPanelOpen);
     gitChangesBtn.classList.toggle('active', gitPanelOpen);
@@ -5407,6 +5409,7 @@
     send({ type: 'abort' });
   });
   gitChangesBtn.addEventListener('click', () => setGitPanelOpen(!gitPanelOpen));
+  gitPanelOverlay.addEventListener('click', () => setGitPanelOpen(false));
   gitCloseBtn.addEventListener('click', () => setGitPanelOpen(false));
   gitRefreshBtn.addEventListener('click', () => {
     if (workspaceTab === 'files') requestWorkspaceFiles();
