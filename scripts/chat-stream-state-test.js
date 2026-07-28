@@ -3,6 +3,7 @@ const {
   finalizeActiveToolCalls,
   normalizeElapsedDuration,
   formatElapsedDuration,
+  createGenerationPoller,
 } = require('../public/chat-stream-state');
 
 assert.strictEqual(normalizeElapsedDuration(-1), null);
@@ -12,6 +13,38 @@ assert.strictEqual(normalizeElapsedDuration('1234.9'), 1234);
 assert.strictEqual(formatElapsedDuration(0), '00:00:00');
 assert.strictEqual(formatElapsedDuration(3723000), '01:02:03');
 assert.strictEqual(formatElapsedDuration(90061000), '25:01:01');
+
+let scheduledRefresh = null;
+let scheduledInterval = null;
+const clearedTimers = [];
+let scheduleCount = 0;
+let refreshCount = 0;
+const poller = createGenerationPoller(() => { refreshCount += 1; }, 2000, {
+  setInterval(refresh, intervalMs) {
+    scheduleCount += 1;
+    scheduledRefresh = refresh;
+    scheduledInterval = intervalMs;
+    return 'git-status-timer';
+  },
+  clearInterval(timerId) {
+    clearedTimers.push(timerId);
+  },
+});
+
+assert.strictEqual(poller.isRunning(), false);
+poller.start();
+poller.start();
+assert.strictEqual(scheduleCount, 1);
+assert.strictEqual(typeof scheduledRefresh, 'function');
+assert.strictEqual(scheduledInterval, 2000);
+assert.strictEqual(poller.isRunning(), true);
+scheduledRefresh();
+assert.strictEqual(refreshCount, 1);
+poller.stop();
+poller.stop();
+assert.deepStrictEqual(clearedTimers, ['git-status-timer']);
+assert.strictEqual(poller.isRunning(), false);
+
 const { createAgentRuntime } = require('../lib/agent-runtime');
 
 const pendingResult = { output: 'command completed' };

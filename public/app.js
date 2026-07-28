@@ -6,8 +6,14 @@
   const RENDER_DEBOUNCE = 100;
   const MAX_RENDERED_MESSAGES = 80;
   const LOCAL_HISTORY_CHUNK_SIZE = 24;
+  const GIT_STATUS_POLL_INTERVAL = 2000;
   const gitWorkspaceView = window.CcGitWorkspaceView;
-  const { finalizeActiveToolCalls, normalizeElapsedDuration, formatElapsedDuration } = window.CcChatStreamState;
+  const {
+    finalizeActiveToolCalls,
+    normalizeElapsedDuration,
+    formatElapsedDuration,
+    createGenerationPoller,
+  } = window.CcChatStreamState;
   const splitLayoutView = window.CcSplitLayout;
 
   const SLASH_COMMANDS = [
@@ -394,13 +400,31 @@
   const splitLayout = splitLayoutView.createSplitLayout({ app, sidebarResizer, rightResizer: gitPanelResizer });
   const desktopLayoutQuery = window.matchMedia('(min-width: 769px)');
 
-  function requestGitStatus() {
+  function requestGitStatus(options = {}) {
     if (!currentSessionId) {
       renderGitStatus({ available: false, files: [] });
       return;
     }
-    gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取变更...</div>';
+    if (options.showLoading !== false) {
+      gitPanelBody.innerHTML = '<div class="git-panel-empty">正在读取变更...</div>';
+    }
     send({ type: 'get_git_status', sessionId: currentSessionId });
+  }
+
+  const gitStatusPoller = createGenerationPoller(
+    () => requestGitStatus({ showLoading: false }),
+    GIT_STATUS_POLL_INTERVAL,
+  );
+
+  function startGitStatusPolling() {
+    requestGitStatus({ showLoading: false });
+    gitStatusPoller.start();
+  }
+
+  function stopGitStatusPolling(refresh = false) {
+    const wasRunning = gitStatusPoller.isRunning();
+    gitStatusPoller.stop();
+    if (refresh && wasRunning) requestGitStatus({ showLoading: false });
   }
 
   function requestWorkspaceFiles(relativePath = currentWorkspacePath) {
@@ -2371,6 +2395,7 @@
 
   function resetChatView(agent) {
     stopGenerationElapsedTimer();
+    stopGitStatusPolling();
     setCurrentAgent(agent);
     currentCodebuddyProfile = '';
     currentSessionId = null;
@@ -2410,6 +2435,7 @@
     const preserveStreaming = !!(options.preserveStreaming && isGenerating && snapshot.sessionId === currentSessionId && snapshot.isRunning);
     if (isGenerating && !preserveStreaming) {
       stopGenerationElapsedTimer();
+      stopGitStatusPolling();
       isGenerating = false;
       sendBtn.hidden = false;
       abortBtn.hidden = true;
@@ -2810,6 +2836,7 @@
     };
 
     ws.onclose = () => {
+      stopGitStatusPolling();
       clearSessionLoading();
       for (const [requestId, resolve] of pendingAgentModelRequests) {
         pendingAgentModelRequests.delete(requestId);
@@ -3003,7 +3030,6 @@
 
       case 'done':
         finishGenerating(msg.sessionId, msg.durationMs);
-        if (gitPanelOpen) setWorkspaceTab(workspaceTab);
         break;
 
       case 'git_status':
@@ -3070,6 +3096,7 @@
           abortBtn.hidden = false;
           activeToolCalls.clear();
           startGenerationElapsedTimer(msg.startedAt);
+          startGitStatusPolling();
         }
         const streamBubble = document.querySelector('#streaming-msg .msg-bubble');
         const resumeSteps = Array.isArray(msg.steps) && msg.steps.length > 0
@@ -3189,6 +3216,8 @@
         showToast(`「${msg.title}」任务完成`, msg.sessionId);
         showBrowserNotification(msg.title);
         if (msg.sessionId === currentSessionId) {
+          stopGitStatusPolling();
+          requestGitStatus({ showLoading: false });
           // Reload current session to show completed response
           openSession(msg.sessionId, { forceSync: true, blocking: false });
         } else {
@@ -3285,6 +3314,7 @@
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
     messagesDiv.appendChild(msgEl);
     startGenerationElapsedTimer(startedAt);
+    startGitStatusPolling();
     showStreamingThinkingIndicator();
     updateContextUsageDisplay();
     syncLastUserResendAction();
@@ -3293,6 +3323,7 @@
   function finishGenerating(sessionId, durationMs) {
     const completedDurationMs = normalizeElapsedDuration(durationMs) ?? getGenerationElapsedMs();
     stopGenerationElapsedTimer();
+    stopGitStatusPolling(true);
     isGenerating = false;
     generationKind = 'response';
     sendBtn.hidden = false;
@@ -3300,7 +3331,6 @@
     abortBtn.disabled = false;
     abortBtn.title = '停止';
     setCurrentSessionRunningState(false);
-    msgInput.focus();
 
     if (pendingText) flushRender();
     finalizeActiveToolCalls(activeToolCalls, updateToolCall);

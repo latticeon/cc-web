@@ -31,5 +31,31 @@
     return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
   }
 
-  return { finalizeActiveToolCalls, normalizeElapsedDuration, formatElapsedDuration };
+  function createGenerationPoller(refresh, intervalMs, clock = {}) {
+    const schedule = clock.setInterval || setInterval;
+    const cancel = clock.clearInterval || clearInterval;
+    let timerId = null;
+
+    return {
+      start() {
+        if (timerId !== null) return;
+        timerId = schedule(refresh, intervalMs);
+      },
+      stop() {
+        if (timerId === null) return;
+        cancel(timerId);
+        timerId = null;
+      },
+      isRunning() {
+        return timerId !== null;
+      },
+    };
+  }
+
+  return {
+    finalizeActiveToolCalls,
+    normalizeElapsedDuration,
+    formatElapsedDuration,
+    createGenerationPoller,
+  };
 });
