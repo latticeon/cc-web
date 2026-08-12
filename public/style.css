@@ -1323,7 +1323,8 @@ body.column-resizing * {
   width: 36px;
   max-height: 80%;
   z-index: 3;
-  pointer-events: none;
+  pointer-events: auto;
+  touch-action: none;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1348,7 +1349,7 @@ body.column-resizing * {
   background: transparent;
   opacity: 0.48;
   cursor: pointer;
-  pointer-events: all;
+  pointer-events: auto;
   transition: opacity 0.14s ease, transform 0.14s ease;
 }
 .message-locator-marker::before {

@@ -338,6 +338,7 @@
   let autoStickToBottom = true;
   let messageLocatorUpdateQueued = false;
   let pendingScrollMessageIndex = null;
+  let activeLocatorTouchMarker = null;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
   let kimiConfigCache = null;
@@ -3741,6 +3742,54 @@
     tip.classList.add('visible');
   }
 
+  function setActiveLocatorTouchMarker(marker) {
+    if (!marker || marker === activeLocatorTouchMarker) return;
+    if (activeLocatorTouchMarker) activeLocatorTouchMarker.classList.remove('touch-preview');
+    activeLocatorTouchMarker = marker;
+    marker.classList.add('touch-preview');
+    showMessageLocatorTip(marker, marker.dataset.tipText || marker.getAttribute('aria-label') || '');
+  }
+
+  function getLocatorMarkerFromTouch(touch) {
+    if (!touch) return null;
+    const locator = messagesWrap?.querySelector('#message-locator');
+    if (!locator) return null;
+    const markers = Array.from(locator.querySelectorAll('.message-locator-marker'));
+    if (markers.length === 0) return null;
+    const x = touch.clientX;
+    const y = touch.clientY;
+    const direct = document.elementFromPoint(x, y)?.closest?.('.message-locator-marker');
+    if (direct && locator.contains(direct)) return direct;
+
+    const locatorRect = locator.getBoundingClientRect();
+    if (x < locatorRect.left - 24 || x > locatorRect.right + 24 || y < locatorRect.top - 24 || y > locatorRect.bottom + 24) {
+      return null;
+    }
+    let best = null;
+    let bestDistance = Infinity;
+    markers.forEach((marker) => {
+      const rect = marker.getBoundingClientRect();
+      const centerY = rect.top + rect.height / 2;
+      const distance = Math.abs(centerY - y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = marker;
+      }
+    });
+    return best;
+  }
+
+  function finishLocatorTouch(shouldJump) {
+    const marker = activeLocatorTouchMarker;
+    activeLocatorTouchMarker = null;
+    if (!marker) return;
+    marker.classList.remove('touch-preview');
+    hideMessageLocatorTip();
+    if (!shouldJump) return;
+    const index = Number(marker.dataset.messageIndex);
+    if (Number.isInteger(index)) scrollMessageIntoView(index);
+  }
+
   function ensureMessageLocator() {
     if (!messagesWrap) return null;
     let locator = messagesWrap.querySelector('#message-locator');
@@ -3749,6 +3798,22 @@
       locator.id = 'message-locator';
       locator.className = 'message-locator';
       locator.setAttribute('aria-label', '消息定位条');
+      locator.addEventListener('touchstart', (e) => {
+        const marker = getLocatorMarkerFromTouch(e.touches?.[0]);
+        if (!marker) return;
+        setActiveLocatorTouchMarker(marker);
+        e.preventDefault();
+      }, { passive: false });
+      locator.addEventListener('touchmove', (e) => {
+        const marker = getLocatorMarkerFromTouch(e.touches?.[0]);
+        if (marker) setActiveLocatorTouchMarker(marker);
+        e.preventDefault();
+      }, { passive: false });
+      locator.addEventListener('touchend', (e) => {
+        finishLocatorTouch(true);
+        e.preventDefault();
+      }, { passive: false });
+      locator.addEventListener('touchcancel', () => finishLocatorTouch(false), { passive: true });
       messagesWrap.appendChild(locator);
     }
     return locator;
@@ -3785,21 +3850,13 @@
       if (!isRendered) marker.classList.add('pending');
       marker.dataset.messageIndex = String(index);
       const tipText = formatMessageLocatorTip(message, index);
+      marker.dataset.tipText = tipText;
       marker.setAttribute('aria-label', tipText);
       marker.addEventListener('click', () => scrollMessageIntoView(index));
       marker.addEventListener('mouseenter', () => showMessageLocatorTip(marker, tipText));
       marker.addEventListener('mouseleave', hideMessageLocatorTip);
       marker.addEventListener('focus', () => showMessageLocatorTip(marker, tipText));
       marker.addEventListener('blur', hideMessageLocatorTip);
-      marker.addEventListener('touchstart', () => {
-        marker.classList.add('touch-preview');
-        showMessageLocatorTip(marker, tipText);
-        clearTimeout(marker._touchPreviewTimer);
-        marker._touchPreviewTimer = setTimeout(() => {
-          marker.classList.remove('touch-preview');
-          hideMessageLocatorTip();
-        }, 1600);
-      }, { passive: true });
       frag.appendChild(marker);
     });
     locator.appendChild(frag);
