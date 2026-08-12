@@ -1801,6 +1801,14 @@ function mergeAssistantMessage(target, incoming) {
   return changed;
 }
 
+function formatUsageSummary(usage) {
+  const inputTokens = Math.max(0, Number(usage?.inputTokens) || 0);
+  const cachedInputTokens = Math.max(0, Number(usage?.cachedInputTokens) || 0);
+  const outputTokens = Math.max(0, Number(usage?.outputTokens) || 0);
+  const cacheRate = inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : 0;
+  return `当前会话累计 Token：输入 ${inputTokens}，缓存读取 ${cachedInputTokens}，输出 ${outputTokens}，缓存率 ${cacheRate.toFixed(1)}%`;
+}
+
 function getLocalSessionWorkspace(sessionId) {
   const session = sessionId ? loadSession(sessionId) : null;
   const cwd = session?.cwd || activeProcesses.get(sessionId)?.cwd || '';
@@ -4249,7 +4257,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
         const usage = session?.totalUsage || { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
         wsSend(ws, {
           type: 'system_message',
-          message: `当前会话累计 Token: 输入 ${usage.inputTokens}，缓存 ${usage.cachedInputTokens}，输出 ${usage.outputTokens}`,
+          message: formatUsageSummary(usage),
         });
       } else {
         const cost = session?.totalCost || 0;

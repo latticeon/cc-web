@@ -2140,6 +2140,40 @@
     return `${num}`;
   }
 
+  function getCacheRate(usage) {
+    const inputTokens = normalizeTokenCount(usage?.inputTokens);
+    const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
+    if (!inputTokens) return 0;
+    return Math.min((cachedInputTokens / inputTokens) * 100, 100);
+  }
+
+  function formatTokenUsageDisplay(usage) {
+    const inputTokens = normalizeTokenCount(usage?.inputTokens);
+    const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
+    const outputTokens = normalizeTokenCount(usage?.outputTokens);
+    if (!inputTokens && !cachedInputTokens && !outputTokens) return '';
+    return `缓存率：${getCacheRate(usage).toFixed(1)}%`;
+  }
+
+  function setTokenUsageDisplay(usage) {
+    const text = formatTokenUsageDisplay(usage);
+    costDisplay.textContent = text;
+    costDisplay.hidden = !text;
+    if (!text) {
+      costDisplay.removeAttribute('title');
+      costDisplay.removeAttribute('aria-label');
+      return;
+    }
+    const inputTokens = normalizeTokenCount(usage?.inputTokens);
+    const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
+    const outputTokens = normalizeTokenCount(usage?.outputTokens);
+    costDisplay.style.setProperty('--cache-rate', `${getCacheRate(usage).toFixed(1)}%`);
+    costDisplay.title = '查看 Token 使用量';
+    costDisplay.setAttribute('aria-label', `缓存率 ${getCacheRate(usage).toFixed(1)}%，点击查看 Token 使用量`);
+    costDisplay.dataset.tipTitle = 'Token 使用量';
+    costDisplay.dataset.tipBody = `输入（含缓存）：${formatTokenCount(inputTokens)}\n输出：${formatTokenCount(outputTokens)}\n缓存：${formatTokenCount(cachedInputTokens)}`;
+  }
+
   function extractTextFromContentNode(content) {
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) return content.map(extractTextFromContentNode).join('\n');
@@ -2936,18 +2970,13 @@
     if (msg && msg.totalUsage) {
       const usage = msg.totalUsage;
       if ((usage.inputTokens || 0) > 0 || (usage.outputTokens || 0) > 0) {
-        const cacheText = usage.cachedInputTokens ? ` · cache ${usage.cachedInputTokens}` : '';
-        costDisplay.textContent = `in ${usage.inputTokens} · out ${usage.outputTokens}${cacheText}`;
+        setTokenUsageDisplay(usage);
         updateContextUsageDisplay();
         return;
       }
     }
-    if (msg && typeof msg.totalCost === 'number' && msg.totalCost > 0) {
-      costDisplay.textContent = `$${msg.totalCost.toFixed(4)}`;
-      updateContextUsageDisplay();
-      return;
-    }
     costDisplay.textContent = '';
+    costDisplay.hidden = true;
     updateContextUsageDisplay();
   }
 
@@ -3251,7 +3280,6 @@
 
       case 'cost':
         if (!isCurrentStreamMessage()) break;
-        costDisplay.textContent = `$${msg.costUsd.toFixed(4)}`;
         if (currentSessionId) {
           updateCachedSession(currentSessionId, (snapshot) => { snapshot.totalCost = msg.costUsd; });
         }
@@ -3260,8 +3288,7 @@
       case 'usage':
         if (!isCurrentStreamMessage()) break;
         if (msg.totalUsage) {
-          const cacheText = msg.totalUsage.cachedInputTokens ? ` · cache ${msg.totalUsage.cachedInputTokens}` : '';
-          costDisplay.textContent = `in ${msg.totalUsage.inputTokens} · out ${msg.totalUsage.outputTokens}${cacheText}`;
+          setTokenUsageDisplay(msg.totalUsage);
           currentContextTokens = normalizeTokenCount(msg.totalUsage.contextTokens);
           generationUsageResolved = currentContextTokens > 0;
           if (currentSessionId) {
@@ -5954,6 +5981,17 @@
       showClickTip(chatContextRow, {
         title: chatContextRow.dataset.tipTitle || '上下文占用估算',
         body: chatContextRow.dataset.tipBody || chatContextText?.textContent || '',
+      });
+    });
+  }
+
+  if (costDisplay) {
+    costDisplay.addEventListener('click', (e) => {
+      if (costDisplay.hidden) return;
+      e.stopPropagation();
+      showClickTip(costDisplay, {
+        title: costDisplay.dataset.tipTitle || 'Token 使用量',
+        body: costDisplay.dataset.tipBody || '',
       });
     });
   }
