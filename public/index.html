@@ -46,10 +46,11 @@
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar">
       <div class="sidebar-header">
-        <div class="new-chat-split">
-          <button id="new-chat-btn" class="new-chat-btn">+ 新会话</button>
-          <button id="new-chat-arrow" class="new-chat-arrow" title="更多">▾</button>
+        <div class="new-chat-actions">
+          <button id="new-chat-btn" class="new-chat-btn" type="button">+ 新对话</button>
+          <button id="new-project-btn" class="new-project-btn" type="button">+ 新项目</button>
         </div>
+        <button id="import-chat-btn" class="import-chat-btn" type="button">导入对话</button>
         <div id="new-chat-dropdown" class="new-chat-dropdown" hidden></div>
         <div class="session-bulk-actions" id="session-bulk-actions">
           <button id="session-multiselect-btn" class="session-bulk-btn" type="button">多选</button>
@@ -75,6 +76,7 @@
         <div class="chat-header-top">
           <div class="chat-header-main">
             <button id="menu-btn" class="menu-btn" title="菜单">☰</button>
+            <span id="chat-runtime-state" class="chat-runtime-state" hidden>运行中</span>
             <span id="chat-title" class="chat-title">新会话</span>
           </div>
           <div class="chat-header-actions">
@@ -85,10 +87,8 @@
             <span id="cost-display" class="cost-display" hidden></span>
           </div>
         </div>
-        <div id="chat-cwd-row" class="chat-header-bottom" hidden>
-          <span id="chat-runtime-state" class="chat-runtime-state" hidden>运行中</span>
+        <div id="chat-header-meta" class="chat-header-bottom" hidden>
           <span id="chat-codebuddy-profile" class="chat-codebuddy-profile" hidden></span>
-          <span id="chat-cwd" class="chat-cwd" hidden></span>
         </div>
       </header>
 

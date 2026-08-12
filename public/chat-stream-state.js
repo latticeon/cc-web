@@ -52,10 +52,28 @@
     };
   }
 
+  function calculateScrollIndicator(scrollTop, scrollHeight, clientHeight, trackHeight, minThumbHeight = 24) {
+    const maxScrollTop = scrollHeight - clientHeight;
+    if (maxScrollTop <= 1 || trackHeight <= 0) return null;
+    const thumbHeight = Math.min(trackHeight, Math.max(minThumbHeight, trackHeight * clientHeight / scrollHeight));
+    const clampedScrollTop = Math.max(0, Math.min(scrollTop, maxScrollTop));
+    const thumbTop = (clampedScrollTop / maxScrollTop) * (trackHeight - thumbHeight);
+    return { thumbHeight, thumbTop };
+  }
+
+  function getNextDisplayLimit(currentLimit, totalCount, increment = 10) {
+    const current = Math.max(0, Number(currentLimit) || 0);
+    const total = Math.max(0, Number(totalCount) || 0);
+    const step = Math.max(1, Number(increment) || 10);
+    return Math.min(total, current + step);
+  }
+
   return {
     finalizeActiveToolCalls,
     normalizeElapsedDuration,
     formatElapsedDuration,
     createGenerationPoller,
+    calculateScrollIndicator,
+    getNextDisplayLimit,
   };
 });

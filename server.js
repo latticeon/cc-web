@@ -2322,6 +2322,8 @@ function sendSessionList(ws) {
           title: s.title || 'Untitled',
           cwd: s.cwd || '',
           remoteCwd: s.remoteCwd || '',
+          taskMode: s.taskMode || 'local',
+          sshHostId: s.sshHostId || '',
           updated: s.updated,
           hasUnread: !!s.hasUnread,
           agent: getSessionAgent(s),

@@ -4,6 +4,8 @@ const {
   normalizeElapsedDuration,
   formatElapsedDuration,
   createGenerationPoller,
+  calculateScrollIndicator,
+  getNextDisplayLimit,
 } = require('../public/chat-stream-state');
 
 assert.strictEqual(normalizeElapsedDuration(-1), null);
@@ -13,6 +15,17 @@ assert.strictEqual(normalizeElapsedDuration('1234.9'), 1234);
 assert.strictEqual(formatElapsedDuration(0), '00:00:00');
 assert.strictEqual(formatElapsedDuration(3723000), '01:02:03');
 assert.strictEqual(formatElapsedDuration(90061000), '25:01:01');
+assert.strictEqual(calculateScrollIndicator(0, 200, 200, 160), null);
+assert.deepStrictEqual(calculateScrollIndicator(0, 400, 200, 160), { thumbHeight: 80, thumbTop: 0 });
+assert.deepStrictEqual(calculateScrollIndicator(100, 400, 200, 160), { thumbHeight: 80, thumbTop: 40 });
+assert.deepStrictEqual(calculateScrollIndicator(200, 400, 200, 160), { thumbHeight: 80, thumbTop: 80 });
+const minimumThumbIndicator = calculateScrollIndicator(999, 2000, 200, 80);
+assert.strictEqual(minimumThumbIndicator.thumbHeight, 24);
+assert.ok(Math.abs(minimumThumbIndicator.thumbTop - 31.08) < 1e-10);
+assert.strictEqual(getNextDisplayLimit(5, 30), 15);
+assert.strictEqual(getNextDisplayLimit(15, 30), 25);
+assert.strictEqual(getNextDisplayLimit(25, 30), 30);
+assert.strictEqual(getNextDisplayLimit(5, 8), 8);
 
 let scheduledRefresh = null;
 let scheduledInterval = null;

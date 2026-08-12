@@ -6,6 +6,8 @@
   const RENDER_DEBOUNCE = 100;
   const MAX_RENDERED_MESSAGES = 80;
   const LOCAL_HISTORY_CHUNK_SIZE = 24;
+  const INITIAL_PROJECT_SESSION_COUNT = 5;
+  const PROJECT_SESSION_LOAD_MORE_COUNT = 10;
   const GIT_STATUS_POLL_INTERVAL = 2000;
   const gitWorkspaceView = window.CcGitWorkspaceView;
   const {
@@ -13,6 +15,8 @@
     normalizeElapsedDuration,
     formatElapsedDuration,
     createGenerationPoller,
+    calculateScrollIndicator,
+    getNextDisplayLimit,
   } = window.CcChatStreamState;
   const splitLayoutView = window.CcSplitLayout;
 
@@ -330,13 +334,13 @@
   let uploadingAttachments = [];
   let loginPasswordValue = ''; // store login password for force-change flow
   let currentCwd = null;
-  let currentCwdExpanded = false;
   let currentSessionRunning = false;
   let currentSessionMessages = [];
   let currentCodebuddyProfile = '';
   let activeClickTip = null;
   let autoStickToBottom = true;
   let messageLocatorUpdateQueued = false;
+  let messageLocatorHistoryPrepended = false;
   let pendingScrollMessageIndex = null;
   let activeLocatorTouchMarker = null;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
@@ -345,6 +349,7 @@
   let isSessionMultiSelectMode = false;
   let selectedSessionIds = new Set();
   let collapsedProjectKeys = new Set(loadCollapsedProjectKeys());
+  const projectSessionDisplayLimits = new Map();
   let gitPanelOpen = false;
   let workspaceTab = 'changes';
   let currentWorkspacePath = '';
@@ -377,9 +382,9 @@
   const sidebarOverlay = $('#sidebar-overlay');
   const menuBtn = $('#menu-btn');
   const chatMain = document.querySelector('.chat-main');
-  const newChatSplit = sidebar.querySelector('.new-chat-split');
   const newChatBtn = $('#new-chat-btn');
-  const newChatArrow = $('#new-chat-arrow');
+  const newProjectBtn = $('#new-project-btn');
+  const importChatBtn = $('#import-chat-btn');
   const newChatDropdown = $('#new-chat-dropdown');
   const sessionMultiSelectBtn = $('#session-multiselect-btn');
   const sessionSelectAllBtn = $('#session-select-all-btn');
@@ -391,8 +396,7 @@
   const thinkingPickerBtn = $('#thinking-picker-btn');
   const chatRuntimeState = $('#chat-runtime-state');
   const chatCodebuddyProfile = $('#chat-codebuddy-profile');
-  const chatCwdRow = $('#chat-cwd-row');
-  const chatCwd = $('#chat-cwd');
+  const chatHeaderMeta = $('#chat-header-meta');
   const chatContextRow = $('#chat-context-row');
   const chatContextLabel = $('#chat-context-label');
   const chatContextText = $('#chat-context-text');
@@ -1862,23 +1866,6 @@
     return parts[parts.length - 1] || normalized;
   }
 
-  function getSessionDirectoryMeta(session) {
-    const remoteCwd = String(session?.remoteCwd || '').trim();
-    if (remoteCwd) {
-      const leaf = getPathLeaf(remoteCwd) || remoteCwd;
-      return {
-        text: `SSH · ${leaf}`,
-        title: `远端目录: ${remoteCwd}`,
-      };
-    }
-    const cwd = String(session?.cwd || '').trim();
-    if (!cwd) return null;
-    return {
-      text: getPathLeaf(cwd) || cwd,
-      title: cwd,
-    };
-  }
-
   function getSessionProjectMeta(session) {
     const remoteCwd = String(session?.remoteCwd || '').trim();
     if (remoteCwd) {
@@ -1936,6 +1923,38 @@
     else collapsedProjectKeys.add(key);
     saveCollapsedProjectKeys(collapsedProjectKeys);
     renderSessionList();
+  }
+
+  function showMoreProjectSessions(projectKey, totalCount) {
+    const currentLimit = projectSessionDisplayLimits.get(projectKey) || INITIAL_PROJECT_SESSION_COUNT;
+    projectSessionDisplayLimits.set(
+      projectKey,
+      getNextDisplayLimit(currentLimit, totalCount, PROJECT_SESSION_LOAD_MORE_COUNT),
+    );
+    renderSessionList();
+  }
+
+  function clearProjectSessions(project) {
+    const projectSessions = Array.isArray(project?.sessions) ? project.sessions : [];
+    if (projectSessions.length === 0) return;
+    deleteSessionsBatch(projectSessions, {
+      message: `确认清空项目“${project.label}”中的 ${projectSessions.length} 个对话？只会删除对话，不会删除项目目录。`,
+      confirmLabel: '确认清空',
+    });
+  }
+
+  function showCurrentProjectNewSessionModal() {
+    const currentSession = currentSessionId ? getSessionMeta(currentSessionId) : null;
+    if (!currentSession) {
+      showToast('请先打开一个项目，或选择“新项目”');
+      return;
+    }
+    const project = getSessionProjectMeta(currentSession);
+    if (project.key === UNGROUPED_PROJECT_KEY) {
+      showToast('当前对话未绑定项目，请选择“新项目”');
+      return;
+    }
+    showProjectNewSessionModal(project);
   }
 
   function showProjectNewSessionModal(project) {
@@ -2058,31 +2077,14 @@
     });
   }
 
-  function updateCwdBadge() {
-    if (!chatCwd || !chatCwdRow) return;
+  function updateChatHeaderMeta() {
     const showCodebuddyProfile = currentAgent === 'codebuddy' && !!currentCodebuddyProfile;
     if (chatCodebuddyProfile) {
       chatCodebuddyProfile.textContent = showCodebuddyProfile ? currentCodebuddyProfile : '';
       chatCodebuddyProfile.title = showCodebuddyProfile ? `CodeBuddy Profile: ${currentCodebuddyProfile}` : '';
       chatCodebuddyProfile.hidden = !showCodebuddyProfile;
     }
-    if (currentCwd) {
-      chatCwd.textContent = currentCwdExpanded ? currentCwd : (getPathLeaf(currentCwd) || currentCwd);
-      chatCwd.title = currentCwd;
-      chatCwd.setAttribute('aria-label', `完整路径: ${currentCwd}`);
-      chatCwd.dataset.tipTitle = '项目目录';
-      chatCwd.dataset.tipBody = currentCwd;
-      chatCwd.classList.toggle('expanded', currentCwdExpanded);
-    } else {
-      chatCwd.textContent = '';
-      chatCwd.title = '';
-      chatCwd.removeAttribute('aria-label');
-      chatCwd.removeAttribute('data-tip-title');
-      chatCwd.removeAttribute('data-tip-body');
-      chatCwd.classList.remove('expanded');
-    }
-    chatCwd.hidden = !currentCwd;
-    chatCwdRow.hidden = !currentCwd && !currentSessionRunning && !showCodebuddyProfile;
+    if (chatHeaderMeta) chatHeaderMeta.hidden = !showCodebuddyProfile;
     if (chatRuntimeState) chatRuntimeState.hidden = !currentSessionRunning;
   }
 
@@ -2093,7 +2095,7 @@
       chatRuntimeState.hidden = !running;
       chatRuntimeState.textContent = running ? '运行中' : '';
     }
-    updateCwdBadge();
+    updateChatHeaderMeta();
   }
 
   function getCurrentCodexModelState() {
@@ -2288,7 +2290,7 @@
       chatContextRow.removeAttribute('data-tip-body');
       chatContextRow.style.setProperty('--context-progress', '0%');
       chatContextRow.classList.remove('is-warn', 'is-danger');
-      updateCwdBadge();
+      updateChatHeaderMeta();
       return;
     }
 
@@ -2306,7 +2308,7 @@
       chatContextRow.style.setProperty('--context-progress', `${percent}%`);
       chatContextRow.classList.toggle('is-warn', ratio >= 0.7 && ratio < 0.9);
       chatContextRow.classList.toggle('is-danger', ratio >= 0.9);
-      updateCwdBadge();
+      updateChatHeaderMeta();
       return;
     }
 
@@ -2317,7 +2319,7 @@
     chatContextRow.dataset.tipBody = `当前估算：${formatTokenCount(estimatedTokens)} tokens\n当前模型未获取到最大上下文，暂不显示百分比。`;
     chatContextRow.style.setProperty('--context-progress', '0%');
     chatContextRow.classList.remove('is-warn', 'is-danger');
-    updateCwdBadge();
+    updateChatHeaderMeta();
   }
 
   function normalizeDynamicModelOption(model, modelControl, fallbackDesc) {
@@ -2584,7 +2586,7 @@
   function updateAgentScopedUI() {
     const importableCount = renderImportSessionMenu();
     if (!importableCount && newChatDropdown && !newChatDropdown.hidden) newChatDropdown.hidden = true;
-    if (newChatArrow) newChatArrow.hidden = importableCount === 0;
+    if (importChatBtn) importChatBtn.hidden = importableCount === 0;
     updateModelControls();
   }
 
@@ -2608,10 +2610,10 @@
     historyLoadState = { sessionId: null, loading: false, hasMore: false };
     renderedMessageStart = 0;
     localHistoryLoading = false;
+    messageLocatorHistoryPrepended = false;
     clearSessionLoading();
     setCurrentSessionRunningState(false);
     currentCwd = null;
-    currentCwdExpanded = false;
     currentWorkspacePath = '';
     currentSessionMessages = [];
     currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
@@ -2623,7 +2625,7 @@
     sendBtn.hidden = false;
     abortBtn.hidden = true;
     chatTitle.textContent = '新会话';
-    updateCwdBadge();
+    updateChatHeaderMeta();
     renderGitStatus({ available: false, files: [] });
     messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
     setStatsDisplay(null);
@@ -2662,9 +2664,8 @@
     generationUsageResolved = false;
     currentSessionMessages = cloneMessages(snapshot.messages || []);
     currentCwd = snapshot.cwd || null;
-    currentCwdExpanded = false;
     currentWorkspacePath = '';
-    updateCwdBadge();
+    updateChatHeaderMeta();
     if (gitPanelOpen) setWorkspaceTab(workspaceTab);
     if (snapshot.mode && MODE_LABELS[snapshot.mode]) {
       currentMode = snapshot.mode;
@@ -2769,11 +2770,12 @@
 
   function finalizeLoadedSession(sessionId) {
     historyLoadState = { sessionId, loading: false, hasMore: false };
-    messagesDiv.querySelector('.history-loader')?.remove();
     if (activeSessionLoad?.sessionId === sessionId && activeSessionLoad.snapshot) {
       activeSessionLoad.snapshot.complete = true;
       cacheSessionSnapshot(activeSessionLoad.snapshot);
     }
+    renderHistoryLoader();
+    retryPendingMessageScroll();
     finishSessionSwitch(sessionId);
   }
 
@@ -2805,9 +2807,24 @@
   function maybeLoadMoreHistory() {
     if ((!historyLoadState.hasMore || historyLoadState.loading) && renderedMessageStart <= 0) return;
     if (messagesDiv.scrollTop <= 120 || messagesDiv.scrollHeight <= messagesDiv.clientHeight + 120) {
-      if (historyLoadState.hasMore) requestMoreHistory();
-      else loadEarlierRenderedMessages();
+      if (renderedMessageStart > 0) loadEarlierRenderedMessages();
+      else if (historyLoadState.hasMore) requestMoreHistory();
     }
+  }
+
+  function bufferEarlierHistoryMessages(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    const prependCount = messages.length;
+    currentSessionMessages = cloneMessages(messages).concat(currentSessionMessages);
+    renderedMessageStart += prependCount;
+    messagesDiv.querySelectorAll('.msg[data-message-index]').forEach((node) => {
+      const index = Number(node.dataset.messageIndex);
+      if (Number.isInteger(index)) node.dataset.messageIndex = String(index + prependCount);
+    });
+    messageLocatorHistoryPrepended = true;
+    updateContextUsageDisplay();
+    renderHistoryLoader();
+    scheduleMessageLocatorUpdate();
   }
 
   function syncRenderedMessageIndexes(options = {}) {
@@ -2878,6 +2895,7 @@
     historyLoadState = { sessionId: null, loading: false, hasMore: false };
     renderedMessageStart = 0;
     localHistoryLoading = false;
+    messageLocatorHistoryPrepended = false;
     setSessionLoading(sessionId, { blocking, label: options.label });
     send({ type: 'load_session', sessionId });
   }
@@ -3165,7 +3183,7 @@
         } else {
           releaseSessionLoadingOverlay(msg.sessionId);
           renderHistoryLoader();
-          requestAnimationFrame(maybeLoadMoreHistory);
+          requestAnimationFrame(requestMoreHistory);
         }
         break;
 
@@ -3173,19 +3191,15 @@
         if (msg.sessionId === currentSessionId && loadedHistorySessionId === msg.sessionId) {
           historyLoadState.loading = false;
           historyLoadState.hasMore = Number(msg.remaining) > 0;
-          const blocking = isBlockingSessionLoad(msg.sessionId);
           if (activeSessionLoad?.sessionId === msg.sessionId && activeSessionLoad.snapshot) {
             activeSessionLoad.snapshot.messages = cloneMessages(msg.messages || []).concat(activeSessionLoad.snapshot.messages);
           }
-          prependHistoryMessages(msg.messages || [], {
-            preserveScroll: !blocking,
-            skipScrollbar: blocking,
-          });
+          bufferEarlierHistoryMessages(msg.messages || []);
           if (!msg.remaining) {
             finalizeLoadedSession(msg.sessionId);
           } else {
             renderHistoryLoader();
-            requestAnimationFrame(maybeLoadMoreHistory);
+            requestAnimationFrame(requestMoreHistory);
           }
         }
         break;
@@ -3688,7 +3702,12 @@
   function retryPendingMessageScroll() {
     if (pendingScrollMessageIndex === null) return;
     const node = getMessageNodeByIndex(pendingScrollMessageIndex);
-    if (!node) return;
+    if (!node) {
+      if (pendingScrollMessageIndex < renderedMessageStart && !localHistoryLoading) {
+        requestAnimationFrame(loadEarlierRenderedMessages);
+      }
+      return;
+    }
     const index = pendingScrollMessageIndex;
     pendingScrollMessageIndex = null;
     scrollMessageIntoView(index);
@@ -3790,6 +3809,32 @@
     if (Number.isInteger(index)) scrollMessageIntoView(index);
   }
 
+  function updateMessageLocatorScrollbar(locator) {
+    const scrollbar = messagesWrap?.querySelector('#message-locator-scrollbar');
+    const thumb = scrollbar?.querySelector('.message-locator-scrollbar-thumb');
+    if (!locator || !scrollbar || !thumb) return;
+
+    const trackHeight = Math.max(0, locator.clientHeight - 8);
+    const indicator = calculateScrollIndicator(
+      locator.scrollTop,
+      locator.scrollHeight,
+      locator.clientHeight,
+      trackHeight,
+    );
+    if (!indicator) {
+      scrollbar.hidden = true;
+      return;
+    }
+
+    scrollbar.hidden = false;
+    const wrapRect = messagesWrap.getBoundingClientRect();
+    const locatorRect = locator.getBoundingClientRect();
+    scrollbar.style.top = `${locatorRect.top - wrapRect.top + 4}px`;
+    scrollbar.style.height = `${trackHeight}px`;
+    thumb.style.height = `${indicator.thumbHeight}px`;
+    thumb.style.transform = `translateY(${indicator.thumbTop}px)`;
+  }
+
   function ensureMessageLocator() {
     if (!messagesWrap) return null;
     let locator = messagesWrap.querySelector('#message-locator');
@@ -3798,6 +3843,17 @@
       locator.id = 'message-locator';
       locator.className = 'message-locator';
       locator.setAttribute('aria-label', '消息定位条');
+      const scrollbar = document.createElement('div');
+      scrollbar.id = 'message-locator-scrollbar';
+      scrollbar.className = 'message-locator-scrollbar';
+      scrollbar.setAttribute('aria-hidden', 'true');
+      scrollbar.hidden = true;
+      const thumb = document.createElement('div');
+      thumb.className = 'message-locator-scrollbar-thumb';
+      scrollbar.appendChild(thumb);
+      messagesWrap.append(locator, scrollbar);
+      locator.addEventListener('scroll', () => updateMessageLocatorScrollbar(locator), { passive: true });
+      new ResizeObserver(() => updateMessageLocatorScrollbar(locator)).observe(locator);
       locator.addEventListener('touchstart', (e) => {
         const marker = getLocatorMarkerFromTouch(e.touches?.[0]);
         if (!marker) return;
@@ -3814,7 +3870,6 @@
         e.preventDefault();
       }, { passive: false });
       locator.addEventListener('touchcancel', () => finishLocatorTouch(false), { passive: true });
-      messagesWrap.appendChild(locator);
     }
     return locator;
   }
@@ -3831,15 +3886,21 @@
       });
     }
     const messageCount = locatorMessages.length;
+    const previousScrollHeight = locator.scrollHeight;
+    const previousScrollTop = locator.scrollTop;
+    const wasAtBottom = previousScrollHeight <= locator.clientHeight + 1
+      || previousScrollHeight - locator.clientHeight - previousScrollTop <= 4;
+    const preservePrependedPosition = messageLocatorHistoryPrepended;
+    messageLocatorHistoryPrepended = false;
     if (messageCount === 0) {
-      locator.innerHTML = '';
+      locator.replaceChildren();
       locator.hidden = true;
+      updateMessageLocatorScrollbar(locator);
       return;
     }
 
     locator.hidden = false;
     hideMessageLocatorTip();
-    locator.innerHTML = '';
     const frag = document.createDocumentFragment();
     const rendered = new Set(Array.from(messagesDiv.querySelectorAll('.msg[data-message-index]')).map((node) => Number(node.dataset.messageIndex)));
     locatorMessages.forEach((message, index) => {
@@ -3859,7 +3920,17 @@
       marker.addEventListener('blur', hideMessageLocatorTip);
       frag.appendChild(marker);
     });
-    locator.appendChild(frag);
+    locator.replaceChildren(frag);
+    requestAnimationFrame(() => {
+      if (preservePrependedPosition) {
+        locator.scrollTop = previousScrollTop + Math.max(0, locator.scrollHeight - previousScrollHeight);
+      } else if (wasAtBottom) {
+        locator.scrollTop = locator.scrollHeight;
+      } else {
+        locator.scrollTop = Math.min(previousScrollTop, locator.scrollHeight - locator.clientHeight);
+      }
+      updateMessageLocatorScrollbar(locator);
+    });
   }
 
   function scheduleMessageLocatorUpdate() {
@@ -4615,40 +4686,6 @@
     }
   }
 
-  function prependHistoryMessages(messages, options = {}) {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    currentSessionMessages = cloneMessages(messages).concat(currentSessionMessages);
-    updateContextUsageDisplay();
-    const preserveScroll = options.preserveScroll !== false;
-    const skipScrollbar = options.skipScrollbar === true;
-    const welcome = messagesDiv.querySelector('.welcome-msg');
-    if (welcome) welcome.remove();
-    const loader = messagesDiv.querySelector('.history-loader');
-    const frag = document.createDocumentFragment();
-    const nextRenderedStart = Math.max(0, renderedMessageStart - messages.length);
-    messages.forEach((m, index) => frag.appendChild(buildMsgElement(m, { messageIndex: nextRenderedStart + index })));
-    const insertBefore = loader?.nextSibling || messagesDiv.firstChild;
-    if (!preserveScroll) {
-      messagesDiv.insertBefore(frag, insertBefore);
-      renderedMessageStart = nextRenderedStart;
-      syncRenderedMessageIndexes({ force: true });
-      syncLastUserResendAction();
-      if (!skipScrollbar) updateScrollbar();
-      scheduleMessageLocatorUpdate();
-      return;
-    }
-    const prevHeight = messagesDiv.scrollHeight;
-    const prevScrollTop = messagesDiv.scrollTop;
-    messagesDiv.insertBefore(frag, insertBefore);
-    renderedMessageStart = nextRenderedStart;
-    syncRenderedMessageIndexes({ force: true });
-    messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
-    syncLastUserResendAction();
-    if (!skipScrollbar) updateScrollbar();
-    scheduleMessageLocatorUpdate();
-    retryPendingMessageScroll();
-  }
-
   function normalizeAskUserInput(input) {
     if (input === null || input === undefined) return null;
     if (typeof input === 'string') {
@@ -5156,7 +5193,6 @@
 
 
   function createSessionItemElement(s) {
-    const directoryMeta = getSessionDirectoryMeta(s);
     const agentBadge = renderSessionAgentBadge(s.agent);
     const item = document.createElement('div');
     const isSelected = selectedSessionIds.has(s.id);
@@ -5170,19 +5206,10 @@
       ` : ''}
       <div class="session-item-main">
         <div class="session-item-title-row">
+          ${agentBadge}
           <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
           ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
         </div>
-        ${directoryMeta ? `
-          <div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">
-            ${agentBadge}
-            <span class="session-item-cwd-text">${escapeHtml(directoryMeta.text)}</span>
-          </div>
-        ` : `
-          <div class="session-item-cwd session-item-cwd--badge-only">
-            ${agentBadge}
-          </div>
-        `}
       </div>
       ${s.hasUnread ? '<span class="session-unread-dot"></span>' : ''}
       <span class="session-item-time">${timeAgo(s.updated)}</span>
@@ -5231,26 +5258,52 @@
     header.className = 'session-project-header';
     header.innerHTML = `
       <button class="session-project-toggle" type="button" aria-expanded="${collapsed ? 'false' : 'true'}" title="${collapsed ? '展开项目' : '收起项目'}">
-        <span class="session-project-chevron">▾</span>
+        <span class="session-project-folder" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+            ${collapsed ? '' : '<path d="M3 10h18"></path>'}
+          </svg>
+        </span>
         <span class="session-project-main">
           <span class="session-project-name">${escapeHtml(group.label)}</span>
           <span class="session-project-path">${escapeHtml(group.title)}</span>
         </span>
         <span class="session-project-count">${group.sessions.length}</span>
       </button>
-      <button class="session-project-new-btn" type="button" title="在此项目中新建对话" ${group.key === UNGROUPED_PROJECT_KEY ? 'disabled' : ''}>+</button>
+      <div class="session-project-actions">
+        <button class="session-project-action-btn session-project-new-btn" type="button" title="在此项目中新建对话" aria-label="在此项目中新建对话" ${group.key === UNGROUPED_PROJECT_KEY ? 'disabled' : ''}>+</button>
+        <button class="session-project-action-btn session-project-clear-btn" type="button" title="清空此项目的对话" aria-label="清空此项目的对话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path>
+          </svg>
+        </button>
+      </div>
     `;
     header.querySelector('.session-project-toggle').addEventListener('click', () => toggleProjectGroup(group.key));
     header.querySelector('.session-project-new-btn').addEventListener('click', (e) => {
       e.stopPropagation();
       showProjectNewSessionModal(group);
     });
+    header.querySelector('.session-project-clear-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearProjectSessions(group);
+    });
     groupEl.appendChild(header);
 
     if (!collapsed) {
       const body = document.createElement('div');
       body.className = 'session-project-body';
-      group.sessions.forEach((session) => body.appendChild(createSessionItemElement(session)));
+      const displayLimit = projectSessionDisplayLimits.get(group.key) || INITIAL_PROJECT_SESSION_COUNT;
+      group.sessions.slice(0, displayLimit).forEach((session) => body.appendChild(createSessionItemElement(session)));
+      if (displayLimit < group.sessions.length) {
+        const showMoreButton = document.createElement('button');
+        showMoreButton.type = 'button';
+        showMoreButton.className = 'session-project-show-more';
+        showMoreButton.textContent = '显示更多';
+        showMoreButton.title = `还有 ${group.sessions.length - displayLimit} 个对话`;
+        showMoreButton.addEventListener('click', () => showMoreProjectSessions(group.key, group.sessions.length));
+        body.appendChild(showMoreButton);
+      }
       groupEl.appendChild(body);
     }
     return groupEl;
@@ -5264,12 +5317,16 @@
     if (visibleSessions.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'session-list-empty';
-      empty.textContent = '暂无会话，点击“新会话”开始。';
+      empty.textContent = '暂无对话，点击“新项目”开始。';
       sessionList.appendChild(empty);
       return;
     }
 
     const groups = groupSessionsByProject(visibleSessions);
+    const currentProjectKeys = new Set(groups.map((group) => group.key));
+    for (const projectKey of projectSessionDisplayLimits.keys()) {
+      if (!currentProjectKeys.has(projectKey)) projectSessionDisplayLimits.delete(projectKey);
+    }
     groups.forEach((group) => sessionList.appendChild(renderProjectGroup(group)));
   }
 
@@ -5890,14 +5947,6 @@
     document.addEventListener('keydown', _pickerEscape);
   }
 
-  if (chatCwd) {
-    chatCwd.addEventListener('click', (e) => {
-      if (!currentCwd) return;
-      e.stopPropagation();
-      showClickTip(chatCwd, { title: '项目目录', body: currentCwd });
-    });
-  }
-
   if (chatContextRow) {
     chatContextRow.addEventListener('click', (e) => {
       if (chatContextRow.hidden) return;
@@ -5909,11 +5958,11 @@
     });
   }
 
-  // Split new-chat button
-  newChatBtn.addEventListener('click', () => showNewSessionModal());
-  newChatArrow.addEventListener('click', (e) => {
+  newChatBtn.addEventListener('click', showCurrentProjectNewSessionModal);
+  newProjectBtn.addEventListener('click', () => showNewSessionModal());
+  importChatBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (newChatArrow.hidden) return;
+    if (importChatBtn.hidden) return;
     newChatDropdown.hidden = !newChatDropdown.hidden;
   });
   newChatDropdown.addEventListener('click', (e) => {
@@ -5925,7 +5974,7 @@
   document.addEventListener('click', (e) => {
     if (!newChatDropdown.hidden &&
         !newChatDropdown.contains(e.target) &&
-        e.target !== newChatArrow) {
+        e.target !== importChatBtn) {
       newChatDropdown.hidden = true;
     }
   });
@@ -8915,7 +8964,6 @@
   setCurrentAgent(currentAgent);
   renderSessionList();
   connect();
-  window.addEventListener('resize', updateCwdBadge);
 
   // Register Service Worker for mobile push notifications
   if ('serviceWorker' in navigator) {
