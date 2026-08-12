@@ -204,6 +204,22 @@
   const SESSION_CACHE_MAX_WEIGHT = 1_500_000;
   const SIDEBAR_SWIPE_TRIGGER = 72;
   const SIDEBAR_SWIPE_MAX_VERTICAL_DRIFT = 42;
+  const PROJECT_COLLAPSE_KEY = 'cc-web-collapsed-projects';
+  const UNGROUPED_PROJECT_KEY = '__cc-web-ungrouped-project__';
+
+  function loadCollapsedProjectKeys() {
+    try {
+      const raw = localStorage.getItem(PROJECT_COLLAPSE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveCollapsedProjectKeys(keys) {
+    try { localStorage.setItem(PROJECT_COLLAPSE_KEY, JSON.stringify(Array.from(keys))); } catch {}
+  }
 
   function getAgentDefinition(agent) {
     return AGENT_MAP[normalizeAgent(agent)] || AGENT_MAP[DEFAULT_AGENT] || AGENT_CATALOG[0];
@@ -319,11 +335,15 @@
   let currentSessionMessages = [];
   let currentCodebuddyProfile = '';
   let activeClickTip = null;
+  let autoStickToBottom = true;
+  let messageLocatorUpdateQueued = false;
+  let pendingScrollMessageIndex = null;
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
   let kimiConfigCache = null;
   let isSessionMultiSelectMode = false;
   let selectedSessionIds = new Set();
+  let collapsedProjectKeys = new Set(loadCollapsedProjectKeys());
   let gitPanelOpen = false;
   let workspaceTab = 'changes';
   let currentWorkspacePath = '';
@@ -392,6 +412,7 @@
   const imageUploadInput = $('#image-upload-input');
   const attachBtn = $('#attach-btn');
   const messagesDiv = $('#messages');
+  const messagesWrap = messagesDiv.closest('.messages-wrap');
   const msgInput = $('#msg-input');
   const inputWrapper = msgInput.closest('.input-wrapper');
   const sendBtn = $('#send-btn');
@@ -1857,6 +1878,185 @@
     };
   }
 
+  function getSessionProjectMeta(session) {
+    const remoteCwd = String(session?.remoteCwd || '').trim();
+    if (remoteCwd) {
+      return {
+        key: `remote:${String(session?.sshHostId || '')}:${remoteCwd}`,
+        title: remoteCwd,
+        label: getPathLeaf(remoteCwd) || remoteCwd,
+        cwd: remoteCwd,
+        taskMode: 'remote',
+        sshHostId: String(session?.sshHostId || ''),
+        remoteCwd,
+      };
+    }
+    const cwd = String(session?.cwd || '').trim();
+    if (cwd) {
+      return {
+        key: `local:${cwd}`,
+        title: cwd,
+        label: getPathLeaf(cwd) || cwd,
+        cwd,
+        taskMode: 'local',
+        sshHostId: '',
+        remoteCwd: '',
+      };
+    }
+    return {
+      key: UNGROUPED_PROJECT_KEY,
+      title: '未绑定项目地址',
+      label: '未绑定项目',
+      cwd: '',
+      taskMode: 'local',
+      sshHostId: '',
+      remoteCwd: '',
+    };
+  }
+
+  function groupSessionsByProject(list) {
+    const groups = new Map();
+    for (const session of list) {
+      const project = getSessionProjectMeta(session);
+      if (!groups.has(project.key)) {
+        groups.set(project.key, { ...project, sessions: [] });
+      }
+      groups.get(project.key).sessions.push(session);
+    }
+    return Array.from(groups.values()).sort((a, b) => {
+      const aUpdated = Math.max(...a.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
+      const bUpdated = Math.max(...b.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
+      return bUpdated - aUpdated;
+    });
+  }
+
+  function toggleProjectGroup(key) {
+    if (collapsedProjectKeys.has(key)) collapsedProjectKeys.delete(key);
+    else collapsedProjectKeys.add(key);
+    saveCollapsedProjectKeys(collapsedProjectKeys);
+    renderSessionList();
+  }
+
+  function showProjectNewSessionModal(project) {
+    if (!project || project.key === UNGROUPED_PROJECT_KEY || (!project.cwd && !project.remoteCwd)) {
+      appendError('这个分组没有项目地址，不能直接新建项目会话。');
+      return;
+    }
+    const agentOrder = ['codex', 'opencode', 'codebuddy', 'kimi', 'claude'];
+    const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
+      const aIndex = agentOrder.indexOf(a.id);
+      const bIndex = agentOrder.indexOf(b.id);
+      return (aIndex < 0 ? agentOrder.length : aIndex) - (bIndex < 0 ? agentOrder.length : bIndex);
+    });
+    const labelForAgent = (agentId) => agentId === 'claude'
+      ? 'Claude Code'
+      : (getAgentDefinition(agentId)?.label || 'Agent');
+    let selectedAgent = normalizeAgent(currentAgent);
+    let selectedCodebuddyProfile = '';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'project-new-session-overlay';
+    overlay.innerHTML = `
+      <div class="modal-panel modal-panel-wide">
+        <div class="modal-header">
+          <span class="modal-title">在项目中新建会话</span>
+          <button class="modal-close-btn" id="pns-close-btn">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="agent-context-card" style="margin-bottom:12px">
+            <div class="agent-context-kicker">${project.taskMode === 'remote' ? '远程项目' : '本地项目'}</div>
+            <div class="agent-context-title">${escapeHtml(project.label)}</div>
+            <div class="agent-context-copy">${escapeHtml(project.title)}</div>
+          </div>
+          <div>
+            <div class="modal-field-label" style="margin-bottom:6px">选择 Agent</div>
+            <div class="ns-agent-grid" id="pns-agent-grid">
+              ${orderedAgents.map((agent) => {
+                const label = labelForAgent(agent.id);
+                return `
+                  <button
+                    type="button"
+                    class="ns-agent-card${agent.id === selectedAgent ? ' active' : ''}"
+                    data-pns-agent="${escapeHtml(agent.id)}"
+                    aria-pressed="${agent.id === selectedAgent ? 'true' : 'false'}"
+                  >
+                    <span class="ns-agent-card-kicker">Agent</span>
+                    <span class="ns-agent-card-label">${escapeHtml(label)}</span>
+                    <span class="ns-agent-card-desc">用于当前项目的新会话</span>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-btn-secondary" id="pns-cancel-btn">取消</button>
+          <button class="modal-btn-primary" id="pns-create-btn">创建</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    function syncSelectedCodebuddyProfile() {
+      if (selectedAgent !== 'codebuddy') {
+        selectedCodebuddyProfile = '';
+        return;
+      }
+      if ((codebuddyConfigCache?.mode || 'local') !== 'custom') {
+        selectedCodebuddyProfile = '';
+        return;
+      }
+      selectedCodebuddyProfile = String(codebuddyConfigCache?.activeProfile || '').trim();
+    }
+
+    function refreshAgentCards() {
+      overlay.querySelectorAll('[data-pns-agent]').forEach((button) => {
+        const active = normalizeAgent(button.dataset.pnsAgent) === selectedAgent;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
+    syncSelectedCodebuddyProfile();
+    overlay.querySelectorAll('[data-pns-agent]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedAgent = normalizeAgent(button.dataset.pnsAgent);
+        syncSelectedCodebuddyProfile();
+        refreshAgentCards();
+      });
+    });
+
+    const close = () => overlay.remove();
+    overlay.querySelector('#pns-close-btn').addEventListener('click', close);
+    overlay.querySelector('#pns-cancel-btn').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#pns-create-btn').addEventListener('click', () => {
+      close();
+      if (project.taskMode === 'remote') {
+        send({
+          type: 'new_session',
+          agent: selectedAgent,
+          mode: localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo',
+          taskMode: 'remote',
+          sshHostId: project.sshHostId,
+          remoteCwd: project.remoteCwd,
+          codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '',
+        });
+      } else {
+        saveRecentCwd(project.cwd);
+        send({
+          type: 'new_session',
+          cwd: project.cwd,
+          agent: selectedAgent,
+          mode: localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo',
+          taskMode: 'local',
+          codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '',
+        });
+      }
+    });
+  }
+
   function updateCwdBadge() {
     if (!chatCwd || !chatCwdRow) return;
     const showCodebuddyProfile = currentAgent === 'codebuddy' && !!currentCodebuddyProfile;
@@ -2430,6 +2630,7 @@
     renderPendingAttachments();
     highlightActiveSession();
     updateModelControls();
+    scheduleMessageLocatorUpdate();
   }
 
   function applySessionSnapshot(snapshot, options = {}) {
@@ -2608,6 +2809,20 @@
     }
   }
 
+  function syncRenderedMessageIndexes(options = {}) {
+    const force = options.force === true;
+    const nodes = Array.from(messagesDiv.querySelectorAll('.msg'));
+    nodes.forEach((node, offset) => {
+      if (node.id === 'streaming-msg') {
+        node.dataset.messageIndex = String(renderedMessageStart + offset);
+        return;
+      }
+      if (force || !node.dataset.messageIndex) {
+        node.dataset.messageIndex = String(renderedMessageStart + offset);
+      }
+    });
+  }
+
   function trimRenderedMessages() {
     const nodes = Array.from(messagesDiv.querySelectorAll('.msg'));
     const maxNodes = MAX_RENDERED_MESSAGES + (document.getElementById('streaming-msg') ? 1 : 0);
@@ -2617,7 +2832,9 @@
       node.remove();
       renderedMessageStart += 1;
     }
+    syncRenderedMessageIndexes({ force: true });
     renderHistoryLoader();
+    scheduleMessageLocatorUpdate();
   }
 
   function loadEarlierRenderedMessages() {
@@ -2631,6 +2848,7 @@
       for (let index = start; index < end; index += 1) {
         frag.appendChild(buildMsgElement(currentSessionMessages[index], {
           allowResend: index === currentSessionMessages.length - 1,
+          messageIndex: index,
         }));
       }
       const previousHeight = messagesDiv.scrollHeight;
@@ -2643,6 +2861,8 @@
       renderHistoryLoader();
       syncLastUserResendAction();
       updateScrollbar();
+      scheduleMessageLocatorUpdate();
+      retryPendingMessageScroll();
     });
   }
 
@@ -2869,6 +3089,7 @@
 
   // --- Server Message Handler ---
   function handleServerMessage(msg) {
+    const isCurrentStreamMessage = () => !msg.sessionId || msg.sessionId === currentSessionId;
     switch (msg.type) {
       case 'auth_result':
         if (msg.success) {
@@ -2978,6 +3199,7 @@
         break;
 
       case 'text_delta':
+        if (!isCurrentStreamMessage()) break;
         if (!isGenerating) startGenerating();
         if (normalizeAgent(currentAgent) === 'codex') {
           finalizeActiveToolCalls(activeToolCalls, updateToolCall);
@@ -2987,12 +3209,14 @@
         break;
 
       case 'tool_start':
+        if (!isCurrentStreamMessage()) break;
         if (!isGenerating) startGenerating();
         activeToolCalls.set(msg.toolUseId, { id: msg.toolUseId, name: msg.name, input: msg.input, kind: msg.kind || null, meta: msg.meta || null, done: false });
         appendToolCall(msg.toolUseId, msg.name, msg.input, false, msg.kind || null, msg.meta || null);
         break;
 
       case 'tool_end':
+        if (!isCurrentStreamMessage()) break;
         if (activeToolCalls.has(msg.toolUseId)) {
           activeToolCalls.get(msg.toolUseId).done = true;
           if (msg.kind) activeToolCalls.get(msg.toolUseId).kind = msg.kind;
@@ -3011,6 +3235,7 @@
         break;
 
       case 'cost':
+        if (!isCurrentStreamMessage()) break;
         costDisplay.textContent = `$${msg.costUsd.toFixed(4)}`;
         if (currentSessionId) {
           updateCachedSession(currentSessionId, (snapshot) => { snapshot.totalCost = msg.costUsd; });
@@ -3018,6 +3243,7 @@
         break;
 
       case 'usage':
+        if (!isCurrentStreamMessage()) break;
         if (msg.totalUsage) {
           const cacheText = msg.totalUsage.cachedInputTokens ? ` · cache ${msg.totalUsage.cachedInputTokens}` : '';
           costDisplay.textContent = `in ${msg.totalUsage.inputTokens} · out ${msg.totalUsage.outputTokens}${cacheText}`;
@@ -3031,6 +3257,7 @@
         break;
 
       case 'done':
+        if (!isCurrentStreamMessage()) break;
         finishGenerating(msg.sessionId, msg.durationMs);
         break;
 
@@ -3058,10 +3285,12 @@
         break;
 
       case 'system_message':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         appendSystemMessage(msg.message);
         break;
 
       case 'mode_changed':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         if (msg.mode && MODE_LABELS[msg.mode]) {
           currentMode = msg.mode;
           modeSelect.value = currentMode;
@@ -3073,6 +3302,7 @@
         break;
 
       case 'model_changed':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         if (msg.model) {
           currentModel = msg.model;
           sessions = sessions.map((session) =>
@@ -3087,6 +3317,7 @@
         break;
 
       case 'resume_generating':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         // Server has an active process for this session — resume streaming
         setCurrentSessionRunningState(true);
         const resumeKind = msg.kind === 'compacting' ? 'compacting' : 'response';
@@ -3130,6 +3361,7 @@
         break;
 
       case 'error':
+        if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         appendError(msg.message);
         clearSessionLoading();
         if (!isGenerating && currentSessionId) {
@@ -3315,6 +3547,8 @@
     const bubble = msgEl.querySelector('.msg-bubble');
     renderAssistantStepsIntoBubble(bubble, [], [], { complete: false, running: true });
     messagesDiv.appendChild(msgEl);
+    syncRenderedMessageIndexes();
+    scheduleMessageLocatorUpdate();
     startGenerationElapsedTimer(startedAt);
     startGitStatusPolling();
     showStreamingThinkingIndicator();
@@ -3363,12 +3597,14 @@
         steps: completedSteps,
         durationMs: completedDurationMs,
       });
+      syncRenderedMessageIndexes();
     }
     trimRenderedMessages();
     updateContextUsageDisplay();
     pendingText = '';
     activeToolCalls.clear();
     syncLastUserResendAction();
+    scheduleMessageLocatorUpdate();
   }
 
   // --- Rendering ---
@@ -3388,7 +3624,8 @@
     setAssistantTextStepContent(textStep, pendingText);
     updateAssistantBubbleLayout(streamEl.querySelector('.msg-bubble'), { complete: false, running: true });
     updateContextUsageDisplay();
-    scrollToBottom();
+    scrollToBottomIfNeeded();
+    scheduleMessageLocatorUpdate();
   }
 
   function renderMarkdown(text) {
@@ -3419,6 +3656,159 @@
       return deepClone(message.steps);
     }
     return buildLegacyAssistantSteps(message?.content || '', message?.toolCalls || []);
+  }
+
+  function getMessagePreviewText(message) {
+    if (!message || typeof message !== 'object') return '';
+    if (message.role === 'assistant') {
+      const steps = getAssistantMessageSteps(message);
+      const text = steps
+        .filter((step) => step?.type === 'text' && step.content)
+        .map((step) => step.content)
+        .join('\n')
+        .trim();
+      if (text) return text;
+      const tool = steps.find((step) => step && step.type !== 'text');
+      if (tool) return toolTitle(tool);
+    }
+    return String(message.content || '').trim();
+  }
+
+  function formatMessageLocatorTip(message, index) {
+    const roleLabel = message?.role === 'user' ? '用户' : (message?.role === 'assistant' ? '助手' : '系统');
+    const preview = getMessagePreviewText(message).replace(/\s+/g, ' ').trim();
+    return `${index + 1}. ${roleLabel}${preview ? `：${preview.slice(0, 120)}` : ''}`;
+  }
+
+  function getMessageNodeByIndex(index) {
+    return messagesDiv.querySelector(`.msg[data-message-index="${index}"]`);
+  }
+
+  function retryPendingMessageScroll() {
+    if (pendingScrollMessageIndex === null) return;
+    const node = getMessageNodeByIndex(pendingScrollMessageIndex);
+    if (!node) return;
+    const index = pendingScrollMessageIndex;
+    pendingScrollMessageIndex = null;
+    scrollMessageIntoView(index);
+  }
+
+  function scrollMessageIntoView(index) {
+    const node = getMessageNodeByIndex(index);
+    if (!node) {
+      if (index < renderedMessageStart) {
+        pendingScrollMessageIndex = index;
+        messagesDiv.scrollTop = 0;
+        maybeLoadMoreHistory();
+      }
+      return;
+    }
+    const top = node.offsetTop - 12;
+    messagesDiv.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    node.classList.add('msg-locator-target');
+    setTimeout(() => node.classList.remove('msg-locator-target'), 1100);
+  }
+
+  function ensureMessageLocatorTip() {
+    if (!messagesWrap) return null;
+    let tip = messagesWrap.querySelector('#message-locator-floating-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'message-locator-floating-tip';
+      tip.className = 'message-locator-floating-tip';
+      messagesWrap.appendChild(tip);
+    }
+    return tip;
+  }
+
+  function hideMessageLocatorTip() {
+    const tip = messagesWrap?.querySelector('#message-locator-floating-tip');
+    if (!tip) return;
+    tip.classList.remove('visible');
+    tip.textContent = '';
+  }
+
+  function showMessageLocatorTip(marker, text) {
+    const tip = ensureMessageLocatorTip();
+    if (!tip || !marker) return;
+    tip.textContent = text;
+    const wrapRect = messagesWrap.getBoundingClientRect();
+    const markerRect = marker.getBoundingClientRect();
+    const tipHeight = tip.offsetHeight || 42;
+    const rawTop = markerRect.top - wrapRect.top + (markerRect.height / 2);
+    const top = Math.max(12 + tipHeight / 2, Math.min(wrapRect.height - 12 - tipHeight / 2, rawTop));
+    tip.style.top = `${top}px`;
+    tip.classList.add('visible');
+  }
+
+  function ensureMessageLocator() {
+    if (!messagesWrap) return null;
+    let locator = messagesWrap.querySelector('#message-locator');
+    if (!locator) {
+      locator = document.createElement('div');
+      locator.id = 'message-locator';
+      locator.className = 'message-locator';
+      locator.setAttribute('aria-label', '消息定位条');
+      messagesWrap.appendChild(locator);
+    }
+    return locator;
+  }
+
+  function updateMessageLocator() {
+    messageLocatorUpdateQueued = false;
+    const locator = ensureMessageLocator();
+    if (!locator) return;
+    const locatorMessages = currentSessionMessages.slice();
+    if (document.getElementById('streaming-msg')) {
+      locatorMessages.push({
+        role: 'assistant',
+        content: pendingText || (generationKind === 'compacting' ? '正在压缩上下文' : '正在思考'),
+      });
+    }
+    const messageCount = locatorMessages.length;
+    if (messageCount === 0) {
+      locator.innerHTML = '';
+      locator.hidden = true;
+      return;
+    }
+
+    locator.hidden = false;
+    hideMessageLocatorTip();
+    locator.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    const rendered = new Set(Array.from(messagesDiv.querySelectorAll('.msg[data-message-index]')).map((node) => Number(node.dataset.messageIndex)));
+    locatorMessages.forEach((message, index) => {
+      const isRendered = rendered.has(index);
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = `message-locator-marker ${message?.role === 'user' ? 'user' : 'assistant'}`;
+      if (!isRendered) marker.classList.add('pending');
+      marker.dataset.messageIndex = String(index);
+      const tipText = formatMessageLocatorTip(message, index);
+      marker.setAttribute('aria-label', tipText);
+      marker.addEventListener('click', () => scrollMessageIntoView(index));
+      marker.addEventListener('mouseenter', () => showMessageLocatorTip(marker, tipText));
+      marker.addEventListener('mouseleave', hideMessageLocatorTip);
+      marker.addEventListener('focus', () => showMessageLocatorTip(marker, tipText));
+      marker.addEventListener('blur', hideMessageLocatorTip);
+      marker.addEventListener('touchstart', () => {
+        marker.classList.add('touch-preview');
+        showMessageLocatorTip(marker, tipText);
+        clearTimeout(marker._touchPreviewTimer);
+        marker._touchPreviewTimer = setTimeout(() => {
+          marker.classList.remove('touch-preview');
+          hideMessageLocatorTip();
+        }, 1600);
+      }, { passive: true });
+      frag.appendChild(marker);
+    });
+    locator.appendChild(frag);
+  }
+
+  function scheduleMessageLocatorUpdate() {
+    if (messageLocatorUpdateQueued) return;
+    messageLocatorUpdateQueued = true;
+    requestAnimationFrame(updateMessageLocator);
   }
 
   function isRenderableAssistantTextStep(step) {
@@ -3693,7 +4083,8 @@
     const streamEl = document.getElementById('streaming-msg');
     if (!streamEl) return;
     ensureStreamingTextStep(streamEl);
-    scrollToBottom();
+    scrollToBottomIfNeeded();
+    scheduleMessageLocatorUpdate();
   }
 
   function renderAssistantStepsIntoBubble(bubble, steps, attachments = [], options = {}) {
@@ -3753,6 +4144,8 @@
     trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
+    syncRenderedMessageIndexes();
+    scheduleMessageLocatorUpdate();
     scrollToBottom();
 
     send({ type: 'message', text, attachments, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
@@ -4068,7 +4461,7 @@
   }
 
 	  function buildMsgElement(m, options = {}) {
-	    const { allowResend = false } = options;
+	    const { allowResend = false, messageIndex = null } = options;
 	    const resendPayload = allowResend && m.role === 'user'
 	      ? { text: m.content || '', attachments: cloneResendAttachments(m.attachments || []) }
 	      : null;
@@ -4078,6 +4471,7 @@
 	      m.role === 'assistant' ? [] : (m.attachments || []),
 	      { resendPayload }
 	    );
+	    if (Number.isInteger(messageIndex)) el.dataset.messageIndex = String(messageIndex);
 	    if (m.role === 'assistant') {
 	      const bubble = el.querySelector('.msg-bubble');
 	      const steps = getAssistantMessageSteps(m);
@@ -4095,6 +4489,7 @@
     currentSessionMessages = cloneMessages(messages || []);
     renderedMessageStart = 0;
     localHistoryLoading = false;
+    autoStickToBottom = true;
     renderEpoch++;
     const epoch = renderEpoch;
     messagesDiv.innerHTML = '';
@@ -4102,16 +4497,18 @@
       messagesDiv.innerHTML = buildWelcomeMarkup(currentAgent);
       syncLastUserResendAction();
       updateContextUsageDisplay();
+      scheduleMessageLocatorUpdate();
       return;
     }
     if (options.immediate) {
       const frag = document.createDocumentFragment();
-      messages.forEach((message, index) => frag.appendChild(buildMsgElement(message, { allowResend: index === messages.length - 1 })));
+      messages.forEach((message, index) => frag.appendChild(buildMsgElement(message, { allowResend: index === messages.length - 1, messageIndex: index })));
       messagesDiv.appendChild(frag);
       trimRenderedMessages();
       syncLastUserResendAction();
       updateContextUsageDisplay();
       scrollToBottom();
+      scheduleMessageLocatorUpdate();
       return;
     }
     // Batch render: last 10 first, then next 20, then the rest
@@ -4130,11 +4527,13 @@
 
     // Render first batch immediately
     const frag0 = document.createDocumentFragment();
-    for (let i = batches[0][0]; i < batches[0][1]; i++) frag0.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1 }));
+    for (let i = batches[0][0]; i < batches[0][1]; i++) frag0.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1, messageIndex: i }));
     messagesDiv.appendChild(frag0);
+    renderedMessageStart = batches[0][0];
     syncLastUserResendAction();
     updateContextUsageDisplay();
     scrollToBottom();
+    scheduleMessageLocatorUpdate();
 
     // Render remaining batches asynchronously, prepending each
     // Use scrollHeight delta to keep current view position stable after prepend
@@ -4147,12 +4546,14 @@
         const prevHeight = messagesDiv.scrollHeight;
         const prevScrollTop = messagesDiv.scrollTop;
         const frag = document.createDocumentFragment();
-        for (let i = start; i < end; i++) frag.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1 }));
+        for (let i = start; i < end; i++) frag.appendChild(buildMsgElement(messages[i], { allowResend: i === len - 1, messageIndex: i }));
         messagesDiv.insertBefore(frag, messagesDiv.firstChild);
+        renderedMessageStart = Math.min(renderedMessageStart, start);
         // Compensate scrollTop so visible area stays unchanged
         messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
         syncLastUserResendAction();
         updateScrollbar();
+        scheduleMessageLocatorUpdate();
       }, delay);
     }
   }
@@ -4167,20 +4568,28 @@
     if (welcome) welcome.remove();
     const loader = messagesDiv.querySelector('.history-loader');
     const frag = document.createDocumentFragment();
-    messages.forEach((m) => frag.appendChild(buildMsgElement(m)));
+    const nextRenderedStart = Math.max(0, renderedMessageStart - messages.length);
+    messages.forEach((m, index) => frag.appendChild(buildMsgElement(m, { messageIndex: nextRenderedStart + index })));
     const insertBefore = loader?.nextSibling || messagesDiv.firstChild;
     if (!preserveScroll) {
       messagesDiv.insertBefore(frag, insertBefore);
+      renderedMessageStart = nextRenderedStart;
+      syncRenderedMessageIndexes({ force: true });
       syncLastUserResendAction();
       if (!skipScrollbar) updateScrollbar();
+      scheduleMessageLocatorUpdate();
       return;
     }
     const prevHeight = messagesDiv.scrollHeight;
     const prevScrollTop = messagesDiv.scrollTop;
     messagesDiv.insertBefore(frag, insertBefore);
+    renderedMessageStart = nextRenderedStart;
+    syncRenderedMessageIndexes({ force: true });
     messagesDiv.scrollTop = prevScrollTop + (messagesDiv.scrollHeight - prevHeight);
     syncLastUserResendAction();
     if (!skipScrollbar) updateScrollbar();
+    scheduleMessageLocatorUpdate();
+    retryPendingMessageScroll();
   }
 
   function normalizeAskUserInput(input) {
@@ -4446,7 +4855,8 @@
     const tool = { id: toolUseId, name, input, kind, meta, done };
     stepsDiv.appendChild(createAssistantToolStepElement(tool));
     updateAssistantBubbleLayout(bubble, { complete: false, running: true });
-    scrollToBottom();
+    scrollToBottomIfNeeded();
+    scheduleMessageLocatorUpdate();
   }
 
   function updateToolCall(toolUseId, result) {
@@ -4574,6 +4984,8 @@
     trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
+    syncRenderedMessageIndexes();
+    scheduleMessageLocatorUpdate();
     scrollToBottom();
   }
 
@@ -4586,14 +4998,30 @@
     trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
+    syncRenderedMessageIndexes();
+    scheduleMessageLocatorUpdate();
     scrollToBottom();
+  }
+
+  function isNearMessageBottom(threshold = 48) {
+    return messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight <= threshold;
   }
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      autoStickToBottom = true;
       updateScrollbar();
+      scheduleMessageLocatorUpdate();
     });
+  }
+
+  function scrollToBottomIfNeeded() {
+    if (!autoStickToBottom) {
+      updateScrollbar();
+      return;
+    }
+    scrollToBottom();
   }
 
   // --- Custom Scrollbar ---
@@ -4616,7 +5044,9 @@
   }
 
   messagesDiv.addEventListener('scroll', () => {
+    autoStickToBottom = isNearMessageBottom();
     updateScrollbar();
+    scheduleMessageLocatorUpdate();
     maybeLoadMoreHistory();
     // 移动端：滚动时短暂显示滑块，停止后淡出
     scrollbarEl.classList.add('scrolling');
@@ -4668,6 +5098,107 @@
   updateScrollbar();
 
 
+  function createSessionItemElement(s) {
+    const directoryMeta = getSessionDirectoryMeta(s);
+    const agentBadge = renderSessionAgentBadge(s.agent);
+    const item = document.createElement('div');
+    const isSelected = selectedSessionIds.has(s.id);
+    item.className = `session-item${s.id === currentSessionId ? ' active' : ''}${isSessionMultiSelectMode ? ' selecting' : ''}${isSelected ? ' selected' : ''}`;
+    item.dataset.id = s.id;
+    item.innerHTML = `
+      ${isSessionMultiSelectMode ? `
+        <label class="session-item-selector" title="选择会话">
+          <input class="session-item-checkbox" type="checkbox" ${isSelected ? 'checked' : ''}>
+        </label>
+      ` : ''}
+      <div class="session-item-main">
+        <div class="session-item-title-row">
+          <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
+          ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
+        </div>
+        ${directoryMeta ? `
+          <div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">
+            ${agentBadge}
+            <span class="session-item-cwd-text">${escapeHtml(directoryMeta.text)}</span>
+          </div>
+        ` : `
+          <div class="session-item-cwd session-item-cwd--badge-only">
+            ${agentBadge}
+          </div>
+        `}
+      </div>
+      ${s.hasUnread ? '<span class="session-unread-dot"></span>' : ''}
+      <span class="session-item-time">${timeAgo(s.updated)}</span>
+      <div class="session-item-actions">
+        <button class="session-item-btn edit" title="重命名">✎</button>
+        <button class="session-item-btn delete" title="删除">×</button>
+      </div>
+    `;
+
+    item.addEventListener('click', (e) => {
+      const target = e.target;
+      if (isSessionMultiSelectMode) {
+        if (target.classList.contains('edit') || target.classList.contains('delete')) {
+          e.stopPropagation();
+          return;
+        }
+        const nextSelected = !selectedSessionIds.has(s.id);
+        if (nextSelected) selectedSessionIds.add(s.id);
+        else selectedSessionIds.delete(s.id);
+        renderSessionList();
+        return;
+      }
+      if (target.classList.contains('delete')) {
+        e.stopPropagation();
+        requestDeleteSession(s);
+        return;
+      }
+      if (target.classList.contains('edit')) {
+        e.stopPropagation();
+        startEditSessionTitle(item, s);
+        return;
+      }
+      openSession(s.id);
+    });
+
+    return item;
+  }
+
+  function renderProjectGroup(group) {
+    const collapsed = collapsedProjectKeys.has(group.key);
+    const groupEl = document.createElement('section');
+    groupEl.className = `session-project${collapsed ? ' collapsed' : ''}`;
+    groupEl.dataset.projectKey = group.key;
+
+    const header = document.createElement('div');
+    header.className = 'session-project-header';
+    header.innerHTML = `
+      <button class="session-project-toggle" type="button" aria-expanded="${collapsed ? 'false' : 'true'}" title="${collapsed ? '展开项目' : '收起项目'}">
+        <span class="session-project-chevron">▾</span>
+        <span class="session-project-main">
+          <span class="session-project-name">${escapeHtml(group.label)}</span>
+          <span class="session-project-path">${escapeHtml(group.title)}</span>
+        </span>
+        <span class="session-project-count">${group.sessions.length}</span>
+      </button>
+      <button class="session-project-new-btn" type="button" title="在此项目中新建对话" ${group.key === UNGROUPED_PROJECT_KEY ? 'disabled' : ''}>+</button>
+    `;
+    header.querySelector('.session-project-toggle').addEventListener('click', () => toggleProjectGroup(group.key));
+    header.querySelector('.session-project-new-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      showProjectNewSessionModal(group);
+    });
+    groupEl.appendChild(header);
+
+    if (!collapsed) {
+      const body = document.createElement('div');
+      body.className = 'session-project-body';
+      group.sessions.forEach((session) => body.appendChild(createSessionItemElement(session)));
+      groupEl.appendChild(body);
+    }
+    return groupEl;
+  }
+
   function renderSessionList() {
     sessionList.innerHTML = '';
     const visibleSessions = getVisibleSessions();
@@ -4681,71 +5212,8 @@
       return;
     }
 
-    for (const s of visibleSessions) {
-      const directoryMeta = getSessionDirectoryMeta(s);
-      const agentBadge = renderSessionAgentBadge(s.agent);
-      const item = document.createElement('div');
-      const isSelected = selectedSessionIds.has(s.id);
-      item.className = `session-item${s.id === currentSessionId ? ' active' : ''}${isSessionMultiSelectMode ? ' selecting' : ''}${isSelected ? ' selected' : ''}`;
-      item.dataset.id = s.id;
-      item.innerHTML = `
-        ${isSessionMultiSelectMode ? `
-          <label class="session-item-selector" title="选择会话">
-            <input class="session-item-checkbox" type="checkbox" ${isSelected ? 'checked' : ''}>
-          </label>
-        ` : ''}
-        <div class="session-item-main">
-          <div class="session-item-title-row">
-            <span class="session-item-title">${escapeHtml(s.title || 'Untitled')}</span>
-            ${s.isRunning ? '<span class="session-item-status">运行中</span>' : ''}
-          </div>
-          ${directoryMeta ? `
-            <div class="session-item-cwd" title="${escapeHtml(directoryMeta.title)}">
-              ${agentBadge}
-              <span class="session-item-cwd-text">${escapeHtml(directoryMeta.text)}</span>
-            </div>
-          ` : `
-            <div class="session-item-cwd session-item-cwd--badge-only">
-              ${agentBadge}
-            </div>
-          `}
-        </div>
-        ${s.hasUnread ? '<span class="session-unread-dot"></span>' : ''}
-        <span class="session-item-time">${timeAgo(s.updated)}</span>
-        <div class="session-item-actions">
-          <button class="session-item-btn edit" title="重命名">✎</button>
-          <button class="session-item-btn delete" title="删除">×</button>
-        </div>
-      `;
-
-      item.addEventListener('click', (e) => {
-        const target = e.target;
-        if (isSessionMultiSelectMode) {
-          if (target.classList.contains('edit') || target.classList.contains('delete')) {
-            e.stopPropagation();
-            return;
-          }
-          const nextSelected = !selectedSessionIds.has(s.id);
-          if (nextSelected) selectedSessionIds.add(s.id);
-          else selectedSessionIds.delete(s.id);
-          renderSessionList();
-          return;
-        }
-        if (target.classList.contains('delete')) {
-          e.stopPropagation();
-          requestDeleteSession(s);
-          return;
-        }
-        if (target.classList.contains('edit')) {
-          e.stopPropagation();
-          startEditSessionTitle(item, s);
-          return;
-        }
-        openSession(s.id);
-      });
-
-      sessionList.appendChild(item);
-    }
+    const groups = groupSessionsByProject(visibleSessions);
+    groups.forEach((group) => sessionList.appendChild(renderProjectGroup(group)));
   }
 
   function startEditSessionTitle(itemEl, session) {
@@ -5223,6 +5691,8 @@
     trimRenderedMessages();
     updateContextUsageDisplay();
     syncLastUserResendAction();
+    syncRenderedMessageIndexes();
+    scheduleMessageLocatorUpdate();
     scrollToBottom();
 
     send({ type: 'message', text, attachments, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });

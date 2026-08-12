@@ -3009,30 +3009,30 @@ function handleProcessComplete(sessionId, exitCode, signal) {
       if (autoRetryRequested) {
         if (contextLimitExceeded) {
           pendingCompactRetries.delete(sessionId);
-          wsSend(entry.ws, { type: 'system_message', message: '已尝试执行 /compact，但仍未成功解除上下文超限。请手动缩小输入范围后重试。' });
+          wsSend(entry.ws, { type: 'system_message', sessionId, message: '已尝试执行 /compact，但仍未成功解除上下文超限。请手动缩小输入范围后重试。' });
         } else {
-          wsSend(entry.ws, { type: 'system_message', message: compactDoneMessage(entry.agent || 'claude') });
-          wsSend(entry.ws, { type: 'system_message', message: compactAutoResumeMessage(entry.agent || 'claude') });
+          wsSend(entry.ws, { type: 'system_message', sessionId, message: compactDoneMessage(entry.agent || 'claude') });
+          wsSend(entry.ws, { type: 'system_message', sessionId, message: compactAutoResumeMessage(entry.agent || 'claude') });
           shouldReturnForFollowup = true;
         }
       } else {
-        wsSend(entry.ws, { type: 'system_message', message: compactDoneMessage(entry.agent || 'claude') });
+        wsSend(entry.ws, { type: 'system_message', sessionId, message: compactDoneMessage(entry.agent || 'claude') });
       }
     }
 
     if (contextLimitExceeded && !pendingSlash && session && getRuntimeSessionId(session)) {
       pendingCompactRetries.set(sessionId, { text: pendingRetry?.text || '', mode: pendingRetry?.mode || session.permissionMode || 'yolo', reason: 'auto' });
-      wsSend(entry.ws, { type: 'system_message', message: compactAutoStartMessage(entry.agent || 'claude') });
+      wsSend(entry.ws, { type: 'system_message', sessionId, message: compactAutoStartMessage(entry.agent || 'claude') });
       shouldAutoCompact = true;
     }
 
     if (completionError && !entry.errorSent && !shouldAutoCompact) {
       entry.errorSent = true;
-      wsSend(entry.ws, { type: 'error', message: completionError });
+      wsSend(entry.ws, { type: 'error', sessionId, message: completionError });
     }
 
     if (hydratedModelChanged && session?.model) {
-      wsSend(entry.ws, { type: 'model_changed', model: sessionModelLabel(session) });
+      wsSend(entry.ws, { type: 'model_changed', sessionId, model: sessionModelLabel(session) });
     }
     wsSend(entry.ws, { type: 'done', sessionId, costUsd: entry.lastCost || null, durationMs });
     sendSessionList(entry.ws);
@@ -5197,6 +5197,7 @@ function handleMessage(ws, msg, options = {}) {
   const entry = {
     pid: proc.pid,
     ws,
+    sessionId: currentSessionId,
     agent: getSessionAgent(session),
     runtimeId,
     processStartMarker,
