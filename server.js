@@ -1798,7 +1798,33 @@ function mergeAssistantMessage(target, incoming) {
     target.durationMs = incoming.durationMs;
     changed = true;
   }
+  if (!target.turnStats && incoming.turnStats) {
+    target.turnStats = incoming.turnStats;
+    changed = true;
+  }
   return changed;
+}
+
+function snapshotUsage(usage) {
+  return {
+    inputTokens: Math.max(0, Number(usage?.inputTokens) || 0),
+    outputTokens: Math.max(0, Number(usage?.outputTokens) || 0),
+  };
+}
+
+function buildTurnStats(entry, usage, durationMs) {
+  const startedAt = Number(entry?.startedAt) || Date.now();
+  const firstTextAt = Number(entry?.turnMetrics?.firstTextAt) || 0;
+  const toolDurationMs = Math.max(0, Math.floor(Number(entry?.turnMetrics?.toolDurationMs) || 0));
+  const totalDurationMs = Math.max(0, Math.floor(Number(durationMs) || 0));
+  const initialUsage = snapshotUsage(entry?.initialUsage);
+  const currentUsage = snapshotUsage(usage);
+  return {
+    firstTokenMs: firstTextAt > 0 ? Math.max(0, firstTextAt - startedAt) : null,
+    toolDurationMs,
+    llmDurationMs: Math.max(0, totalDurationMs - toolDurationMs),
+    outputTokens: Math.max(0, currentUsage.outputTokens - initialUsage.outputTokens),
+  };
 }
 
 function formatUsageSummary(usage) {
@@ -2980,12 +3006,14 @@ function handleProcessComplete(sessionId, exitCode, signal) {
     }
   }
   if (session && (entry.fullText || (entry.assistantSteps || []).length > 0)) {
+    const turnStats = buildTurnStats(entry, session.totalUsage, durationMs);
     const saved = upsertTrailingAssistantMessage(session, {
       content: entry.fullText,
       toolCalls: entry.toolCalls || [],
       steps: entry.assistantSteps || [],
       timestamp: new Date().toISOString(),
       durationMs,
+      turnStats,
     });
     if (saved.changed) {
       if (saved.appended) {
@@ -3044,7 +3072,13 @@ function handleProcessComplete(sessionId, exitCode, signal) {
     if (hydratedModelChanged && session?.model) {
       wsSend(entry.ws, { type: 'model_changed', sessionId, model: sessionModelLabel(session) });
     }
-    wsSend(entry.ws, { type: 'done', sessionId, costUsd: entry.lastCost || null, durationMs });
+    wsSend(entry.ws, {
+      type: 'done',
+      sessionId,
+      costUsd: entry.lastCost || null,
+      durationMs,
+      turnStats: buildTurnStats(entry, session?.totalUsage, durationMs),
+    });
     sendSessionList(entry.ws);
     // Push notification when trigger='always' (user online but still wants notification)
     (() => {
@@ -3197,6 +3231,8 @@ function recoverProcesses() {
           assistantSteps: [],
           lastCost: null,
           lastUsage: null,
+          initialUsage: snapshotUsage(session.totalUsage),
+          turnMetrics: { firstTextAt: null, toolStartedAt: new Map(), toolDurationMs: 0 },
           lastError: null,
           errorSent: false,
           tailer: null,
@@ -5220,6 +5256,8 @@ function handleMessage(ws, msg, options = {}) {
     assistantSteps: [],
     lastCost: null,
     lastUsage: null,
+    initialUsage: snapshotUsage(session.totalUsage),
+    turnMetrics: { firstTextAt: null, toolStartedAt: new Map(), toolDurationMs: 0 },
     lastError: null,
     errorSent: false,
     tailer: null,

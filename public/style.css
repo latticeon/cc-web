@@ -1286,33 +1286,17 @@ body.column-resizing * {
   animation: pulse 1.1s infinite;
 }
 .cost-display {
-  --cache-rate: 0%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  min-height: 24px;
-  max-width: 116px;
-  padding: 3px 5px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: linear-gradient(90deg, #78b98b 0 var(--cache-rate), #b8c1c5 var(--cache-rate) 100%);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.16);
+  display: block;
+  max-width: 800px;
+  margin: 6px auto 0;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-.cost-display:hover,
-.cost-display:focus-visible {
-  border-color: var(--accent);
-  color: #fff;
-  outline: none;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .cost-display[hidden],
 .cost-display:empty { display: none; }

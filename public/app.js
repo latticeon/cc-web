@@ -336,6 +336,7 @@
   let currentCwd = null;
   let currentSessionRunning = false;
   let currentSessionMessages = [];
+  let currentSessionUsage = null;
   let currentCodebuddyProfile = '';
   let activeClickTip = null;
   let autoStickToBottom = true;
@@ -2152,26 +2153,77 @@
     const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
     const outputTokens = normalizeTokenCount(usage?.outputTokens);
     if (!inputTokens && !cachedInputTokens && !outputTokens) return '';
-    return `缓存率：${getCacheRate(usage).toFixed(1)}%`;
+    const summary = getTurnSummary(currentSessionMessages);
+    const sections = [];
+    if (summary.turns > 0) sections.push(`${summary.turns} 轮 · ${summary.steps} 步`);
+    if (summary.llmDurationMs > 0 || summary.toolDurationMs > 0) {
+      sections.push(`LLM ${formatStatsDuration(summary.llmDurationMs)} · 工具调用 ${formatStatsDuration(summary.toolDurationMs)}`);
+    }
+    if (summary.firstTokenCount > 0 || summary.tokenRate > 0) {
+      const parts = [];
+      if (summary.firstTokenCount > 0) parts.push(`首 token 平均 ${formatStatsDuration(summary.firstTokenTotalMs / summary.firstTokenCount)}`);
+      if (summary.tokenRate > 0) parts.push(`${formatTokenRate(summary.tokenRate)} tok/s`);
+      sections.push(parts.join(' · '));
+    }
+    sections.push(`缓存命中 ${formatCacheRate(usage)}%`);
+    sections.push(`输入 ${formatStatsTokenCount(inputTokens)} tok · 输出 ${formatStatsTokenCount(outputTokens)} tok`);
+    return sections.join(' | ');
   }
 
   function setTokenUsageDisplay(usage) {
+    currentSessionUsage = usage ? deepClone(usage) : null;
     const text = formatTokenUsageDisplay(usage);
     costDisplay.textContent = text;
     costDisplay.hidden = !text;
-    if (!text) {
-      costDisplay.removeAttribute('title');
-      costDisplay.removeAttribute('aria-label');
-      return;
+    costDisplay.removeAttribute('title');
+    costDisplay.removeAttribute('aria-label');
+  }
+
+  function formatStatsTokenCount(value) {
+    const num = normalizeTokenCount(value);
+    if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(num >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
+    if (num >= 1_000) return `${(num / 1_000).toFixed(num >= 10_000 ? 0 : 1).replace(/\.0$/, '')}K`;
+    return `${num}`;
+  }
+
+  function formatStatsDuration(value) {
+    const seconds = Math.max(0, Number(value) || 0) / 1000;
+    return `${seconds.toFixed(seconds >= 10 ? 0 : 1).replace(/\.0$/, '')}s`;
+  }
+
+  function formatTokenRate(value) {
+    const rate = Math.max(0, Number(value) || 0);
+    return rate.toFixed(rate >= 10 ? 0 : 1).replace(/\.0$/, '');
+  }
+
+  function formatCacheRate(usage) {
+    return getCacheRate(usage).toFixed(1).replace(/\.0$/, '');
+  }
+
+  function getTurnSummary(messages) {
+    const summary = { turns: 0, steps: 0, llmDurationMs: 0, toolDurationMs: 0, firstTokenTotalMs: 0, firstTokenCount: 0, outputTokens: 0, tokenRate: 0 };
+    for (const message of messages || []) {
+      if (message?.role !== 'assistant') continue;
+      summary.turns += 1;
+      summary.steps += getAssistantMessageSteps(message).length;
+      const stats = message.turnStats;
+      if (!stats || typeof stats !== 'object') continue;
+      summary.llmDurationMs += Math.max(0, Number(stats.llmDurationMs) || 0);
+      summary.toolDurationMs += Math.max(0, Number(stats.toolDurationMs) || 0);
+      summary.outputTokens += normalizeTokenCount(stats.outputTokens);
+      if (Number.isFinite(Number(stats.firstTokenMs))) {
+        summary.firstTokenTotalMs += Math.max(0, Number(stats.firstTokenMs));
+        summary.firstTokenCount += 1;
+      }
     }
-    const inputTokens = normalizeTokenCount(usage?.inputTokens);
-    const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
-    const outputTokens = normalizeTokenCount(usage?.outputTokens);
-    costDisplay.style.setProperty('--cache-rate', `${getCacheRate(usage).toFixed(1)}%`);
-    costDisplay.title = '查看 Token 使用量';
-    costDisplay.setAttribute('aria-label', `缓存率 ${getCacheRate(usage).toFixed(1)}%，点击查看 Token 使用量`);
-    costDisplay.dataset.tipTitle = 'Token 使用量';
-    costDisplay.dataset.tipBody = `输入（含缓存）：${formatTokenCount(inputTokens)}\n输出：${formatTokenCount(outputTokens)}\n缓存：${formatTokenCount(cachedInputTokens)}`;
+    if (summary.llmDurationMs > 0 && summary.outputTokens > 0) {
+      summary.tokenRate = summary.outputTokens * 1000 / summary.llmDurationMs;
+    }
+    return summary;
+  }
+
+  function refreshTokenUsageDisplay() {
+    setTokenUsageDisplay(currentSessionUsage);
   }
 
   function extractTextFromContentNode(content) {
@@ -2650,6 +2702,7 @@
     currentCwd = null;
     currentWorkspacePath = '';
     currentSessionMessages = [];
+    currentSessionUsage = null;
     currentModel = getAgentDefinition(currentAgent)?.defaults?.initialModel || '';
     isGenerating = false;
     pendingText = '';
@@ -2697,6 +2750,8 @@
     currentContextTokens = normalizeTokenCount(snapshot.totalUsage?.contextTokens);
     generationUsageResolved = false;
     currentSessionMessages = cloneMessages(snapshot.messages || []);
+    currentSessionUsage = snapshot.totalUsage ? deepClone(snapshot.totalUsage) : null;
+    refreshTokenUsageDisplay();
     currentCwd = snapshot.cwd || null;
     currentWorkspacePath = '';
     updateChatHeaderMeta();
@@ -2850,6 +2905,7 @@
     if (!Array.isArray(messages) || messages.length === 0) return;
     const prependCount = messages.length;
     currentSessionMessages = cloneMessages(messages).concat(currentSessionMessages);
+    refreshTokenUsageDisplay();
     renderedMessageStart += prependCount;
     messagesDiv.querySelectorAll('.msg[data-message-index]').forEach((node) => {
       const index = Number(node.dataset.messageIndex);
@@ -3300,7 +3356,7 @@
 
       case 'done':
         if (!isCurrentStreamMessage()) break;
-        finishGenerating(msg.sessionId, msg.durationMs);
+        finishGenerating(msg.sessionId, msg.durationMs, msg.turnStats);
         break;
 
       case 'git_status':
@@ -3598,7 +3654,7 @@
     syncLastUserResendAction();
   }
 
-  function finishGenerating(sessionId, durationMs) {
+  function finishGenerating(sessionId, durationMs, turnStats = null) {
     const completedDurationMs = normalizeElapsedDuration(durationMs) ?? getGenerationElapsedMs();
     stopGenerationElapsedTimer();
     stopGitStatusPolling(true);
@@ -3638,6 +3694,7 @@
         content: pendingText,
         steps: completedSteps,
         durationMs: completedDurationMs,
+        turnStats: turnStats && typeof turnStats === 'object' ? deepClone(turnStats) : null,
       });
       syncRenderedMessageIndexes();
     }
@@ -3645,6 +3702,7 @@
     updateContextUsageDisplay();
     pendingText = '';
     activeToolCalls.clear();
+    refreshTokenUsageDisplay();
     syncLastUserResendAction();
     scheduleMessageLocatorUpdate();
   }
@@ -5981,17 +6039,6 @@
       showClickTip(chatContextRow, {
         title: chatContextRow.dataset.tipTitle || '上下文占用估算',
         body: chatContextRow.dataset.tipBody || chatContextText?.textContent || '',
-      });
-    });
-  }
-
-  if (costDisplay) {
-    costDisplay.addEventListener('click', (e) => {
-      if (costDisplay.hidden) return;
-      e.stopPropagation();
-      showClickTip(costDisplay, {
-        title: costDisplay.dataset.tipTitle || 'Token 使用量',
-        body: costDisplay.dataset.tipBody || '',
       });
     });
   }
