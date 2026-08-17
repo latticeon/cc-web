@@ -941,9 +941,10 @@
     });
   }
 
-  function buildAppearanceEntryHtml() {
+  function buildAppearanceEntryHtml(options = {}) {
+    const { includeTitle = true } = options;
     return `
-      <div class="settings-section-title">外观</div>
+      ${includeTitle ? '<div class="settings-section-title">外观</div>' : ''}
       <button class="settings-nav-card" type="button" data-open-theme-page>
         <span class="settings-nav-card-main">
           <span class="settings-nav-card-title">界面主题</span>
@@ -961,13 +962,14 @@
     `;
   }
 
-  function buildNotifyEntryHtml(config) {
+  function buildNotifyEntryHtml(config, options = {}) {
+    const { includeTitle = true } = options;
     const provider = config?.provider || 'off';
     const providerLabel = PROVIDER_OPTIONS.find(o => o.value === provider)?.label || '关闭';
     const summaryOn = config?.summary?.enabled ? '摘要已启用' : '摘要关闭';
     const meta = provider === 'off' ? '未启用' : `${providerLabel} · ${summaryOn}`;
     return `
-      <div class="settings-section-title">通知</div>
+      ${includeTitle ? '<div class="settings-section-title">通知</div>' : ''}
       <button class="settings-nav-card" type="button" data-open-notify-page>
         <span class="settings-nav-card-main">
           <span class="settings-nav-card-title">通知设置</span>
@@ -6546,7 +6548,7 @@
     currentPwIn.focus();
   }
 
-  function showSettingsPanel() {
+  function showLegacySettingsPanel() {
     send({ type: 'get_model_config' });
     send({ type: 'get_codex_config' });
     send({ type: 'get_codebuddy_config' });
@@ -8059,6 +8061,269 @@
     overlay.addEventListener('click', (e) => { if (e.target === overlay) hideSettingsPanel(); });
 
     document.addEventListener('keydown', _settingsEscape);
+  }
+
+  function showSettingsPanel() {
+    send({ type: 'get_notify_config' });
+    send({ type: 'get_cli_install_status' });
+
+    const overlay = document.createElement('div');
+    overlay.className = 'settings-overlay';
+    overlay.id = 'settings-overlay';
+
+    const panel = document.createElement('div');
+    panel.className = 'settings-panel settings-shell-panel';
+    panel.innerHTML = `
+      <div class="settings-shell">
+        <div class="settings-header settings-main-header">
+          <div class="settings-main-title">
+            <div class="settings-main-kicker">CC-Web / Preferences</div>
+            <h3>设置</h3>
+          </div>
+          <button class="settings-close" type="button" title="关闭">&times;</button>
+        </div>
+
+        <div class="settings-layout">
+          <nav class="settings-sidebar" aria-label="设置分类" role="tablist" aria-orientation="vertical">
+            <div class="settings-sidebar-label">设置分类</div>
+            <button class="settings-nav-tab active" type="button" role="tab" aria-selected="true" aria-controls="settings-content-status" data-settings-category="status">
+              <span class="settings-nav-index">01</span>
+              <span class="settings-nav-tab-copy"><strong>状态</strong><small>CLI 与更新</small></span>
+            </button>
+            <button class="settings-nav-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-content-model" data-settings-category="model">
+              <span class="settings-nav-index">02</span>
+              <span class="settings-nav-tab-copy"><strong>模型</strong><small>API 配置</small></span>
+              <span class="settings-nav-tab-badge">待确认</span>
+            </button>
+            <button class="settings-nav-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-content-appearance" data-settings-category="appearance">
+              <span class="settings-nav-index">03</span>
+              <span class="settings-nav-tab-copy"><strong>外观</strong><small>主题与字体</small></span>
+            </button>
+            <button class="settings-nav-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-content-notifications" data-settings-category="notifications">
+              <span class="settings-nav-index">04</span>
+              <span class="settings-nav-tab-copy"><strong>通知</strong><small>任务提醒</small></span>
+            </button>
+            <button class="settings-nav-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-content-developer" data-settings-category="developer">
+              <span class="settings-nav-index">05</span>
+              <span class="settings-nav-tab-copy"><strong>开发者</strong><small>GitHub 与 SSH</small></span>
+            </button>
+            <button class="settings-nav-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-content-system" data-settings-category="system">
+              <span class="settings-nav-index">06</span>
+              <span class="settings-nav-tab-copy"><strong>系统</strong><small>账户相关操作</small></span>
+            </button>
+          </nav>
+
+          <div class="settings-content">
+            <section class="settings-content-section active" id="settings-content-status" role="tabpanel">
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">Runtime</div>
+                <h4>状态</h4>
+                <p>查看本机 CLI 安装情况与 CC-Web 更新状态。</p>
+              </div>
+              <div class="settings-block">
+                <div class="settings-block-header">
+                  <div>
+                    <h5>CLI 安装状态</h5>
+                    <p>当前环境中可用的命令行 Agent。</p>
+                  </div>
+                  <span class="settings-block-mark">LOCAL</span>
+                </div>
+                <div id="cli-install-status-area"></div>
+              </div>
+              <div class="settings-block settings-update-block">
+                <div class="settings-block-header">
+                  <div>
+                    <h5>版本更新</h5>
+                    <p>检查 CC-Web 是否有可用的新版本。</p>
+                  </div>
+                  <span class="settings-update-state checking" id="update-state">检查中</span>
+                </div>
+                <div class="settings-update-actions">
+                  <div class="settings-status" id="update-status">正在检查...</div>
+                  <button class="btn-test" id="check-update-btn" type="button">重新检查</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-content-section" id="settings-content-model" role="tabpanel" hidden>
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">Models</div>
+                <h4>模型</h4>
+                <p>统一 API 配置与 CodeBuddy 例外项将在确认方案后接入。</p>
+              </div>
+              <div class="settings-placeholder">
+                <span class="settings-placeholder-mark">02</span>
+                <div>
+                  <h5>模型配置待确认</h5>
+                  <p>本轮先保留分类入口，不展示现有的分模型配置，避免在配置规则未确定前继续扩大使用范围。</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-content-section" id="settings-content-appearance" role="tabpanel" hidden>
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">Appearance</div>
+                <h4>外观</h4>
+                <p>调整界面主题与字体，修改会立即生效。</p>
+              </div>
+              <div class="settings-content-list">
+                ${buildAppearanceEntryHtml({ includeTitle: false })}
+              </div>
+            </section>
+
+            <section class="settings-content-section" id="settings-content-notifications" role="tabpanel" hidden>
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">Notifications</div>
+                <h4>通知</h4>
+                <p>设置任务完成、异常和上下文压缩提醒。</p>
+              </div>
+              <div class="settings-content-list">
+                ${buildNotifyEntryHtml(null, { includeTitle: false })}
+              </div>
+            </section>
+
+            <section class="settings-content-section" id="settings-content-developer" role="tabpanel" hidden>
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">Developer</div>
+                <h4>开发者</h4>
+                <p>管理 GitHub 仓库和 SSH 主机等开发工具配置。</p>
+              </div>
+              <div class="settings-content-list">
+                <button class="settings-nav-card" type="button" data-open-dev-page>
+                  <span class="settings-nav-card-main">
+                    <span class="settings-nav-card-title">开发者设置</span>
+                    <span class="settings-nav-card-meta">GitHub / SSH 配置</span>
+                  </span>
+                  <span class="settings-nav-card-arrow" aria-hidden="true">›</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="settings-content-section" id="settings-content-system" role="tabpanel" hidden>
+              <div class="settings-content-heading">
+                <div class="settings-content-kicker">System</div>
+                <h4>系统</h4>
+                <p>管理登录账户相关操作。</p>
+              </div>
+              <div class="settings-content-list">
+                <div class="settings-system-row">
+                  <div>
+                    <strong>登录密码</strong>
+                    <span>修改访问 CC-Web 使用的密码。</span>
+                  </div>
+                  <button class="btn-test" id="pw-open-modal-btn" type="button">修改密码</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
+    const updateStatusEl = panel.querySelector('#update-status');
+    const updateStateEl = panel.querySelector('#update-state');
+    let onUpdateInfo = null;
+
+    function renderCliInstallStatus(status = {}) {
+      const agents = [
+        { key: 'kimi', label: 'Kimi' },
+        { key: 'claude', label: 'Claude' },
+        { key: 'codex', label: 'Codex' },
+        { key: 'codebuddy', label: 'CodeBuddy' },
+        { key: 'opencode', label: 'OpenCode' },
+      ];
+      cliInstallStatusArea.innerHTML = `
+        <div class="settings-cli-list">
+          ${agents.map((agent) => {
+            const item = status?.[agent.key] || {};
+            const installed = !!item.installed;
+            const version = item.version || '';
+            return `
+              <div class="settings-cli-card${installed ? ' is-installed' : ''}">
+                <div class="settings-cli-card-head">
+                  <span class="settings-cli-name">${escapeHtml(agent.label)}</span>
+                  <span class="settings-cli-badge ${installed ? 'success' : 'muted'}">${installed ? '已安装' : '未安装'}</span>
+                </div>
+                <div class="settings-cli-meta">${installed ? escapeHtml(version || '已安装') : '未检测到可用命令'}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderUpdateInfo(info = {}) {
+      if (info.error) {
+        updateStatusEl.textContent = '检查失败: ' + info.error;
+        updateStateEl.textContent = '检查失败';
+        updateStateEl.className = 'settings-update-state error';
+        updateStatusEl.className = 'settings-status error';
+        return;
+      }
+      if (info.hasUpdate) {
+        updateStatusEl.innerHTML = `有新版本 <strong>v${escapeHtml(info.latestVersion)}</strong>（当前 v${escapeHtml(info.localVersion)}）&nbsp;<a href="${escapeHtml(info.releaseUrl)}" target="_blank" rel="noreferrer" style="color:var(--accent)">查看更新</a>`;
+        updateStateEl.textContent = '有更新';
+        updateStateEl.className = 'settings-update-state update';
+        updateStatusEl.className = 'settings-status success';
+        return;
+      }
+      updateStatusEl.textContent = `已是最新版本 v${info.localVersion || '未知'}`;
+      updateStateEl.textContent = '已是最新';
+      updateStateEl.className = 'settings-update-state success';
+      updateStatusEl.className = 'settings-status success';
+    }
+
+    function checkForUpdate() {
+      updateStatusEl.textContent = '正在检查...';
+      updateStatusEl.className = 'settings-status';
+      updateStateEl.textContent = '检查中';
+      updateStateEl.className = 'settings-update-state checking';
+      onUpdateInfo = (info) => {
+        onUpdateInfo = null;
+        renderUpdateInfo(info);
+      };
+      send({ type: 'check_update' });
+    }
+
+    _onCliInstallStatus = (status) => renderCliInstallStatus(status || {});
+    window._ccOnUpdateInfo = (info) => { if (onUpdateInfo) onUpdateInfo(info); };
+    renderCliInstallStatus();
+
+    const categoryButtons = panel.querySelectorAll('[data-settings-category]');
+    const categorySections = panel.querySelectorAll('.settings-content-section');
+    categoryButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const category = button.dataset.settingsCategory;
+        categoryButtons.forEach((item) => {
+          const active = item === button;
+          item.classList.toggle('active', active);
+          item.setAttribute('aria-selected', String(active));
+        });
+        categorySections.forEach((section) => {
+          const active = section.id === `settings-content-${category}`;
+          section.classList.toggle('active', active);
+          section.hidden = !active;
+        });
+      });
+    });
+
+    panel.querySelector('[data-open-theme-page]')?.addEventListener('click', openThemeSubpage);
+    panel.querySelector('[data-open-font-page]')?.addEventListener('click', openFontSubpage);
+    panel.querySelector('[data-open-notify-page]')?.addEventListener('click', openNotifySubpage);
+    panel.querySelector('[data-open-dev-page]')?.addEventListener('click', openDevSettingsSubpage);
+    panel.querySelector('#pw-open-modal-btn')?.addEventListener('click', openPasswordModal);
+    panel.querySelector('#check-update-btn')?.addEventListener('click', checkForUpdate);
+
+    const closeBtn = panel.querySelector('.settings-close');
+    closeBtn.addEventListener('click', hideSettingsPanel);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) hideSettingsPanel(); });
+    document.addEventListener('keydown', _settingsEscape);
+
+    checkForUpdate();
   }
 
   function hideSettingsPanel() {
