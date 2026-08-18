@@ -6630,80 +6630,123 @@
     overlay.id = 'settings-overlay';
 
     const panel = document.createElement('div');
-    panel.className = 'settings-panel';
+    panel.className = 'settings-panel settings-main-panel';
 
     panel.innerHTML = `
-      <h3>
-        ⚙ 设置
+      <div class="settings-header">
+        <h3>⚙ 设置</h3>
         <button class="settings-close" title="关闭">&times;</button>
-      </h3>
-
-      <div class="settings-section-title">CLI 安装状态</div>
-      <div id="cli-install-status-area"></div>
-
-      <div class="settings-divider"></div>
-
-      <div class="settings-section-title">Claude API 配置</div>
-      <div id="claude-config-area"></div>
-      <div class="settings-actions">
-        <button class="btn-save" id="model-save-btn">保存 Claude 配置</button>
       </div>
-      <div class="settings-status" id="model-status"></div>
 
-      <div class="settings-divider"></div>
-
-      <div class="settings-section-title">Codex API 配置</div>
-      <div id="codex-config-area"></div>
-      <div class="settings-actions">
-        <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="settings-tab-cli" data-settings-tab="cli">CLI 状态</button>
+        <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tab-ai" data-settings-tab="ai">AI 配置</button>
+        <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tab-appearance" data-settings-tab="appearance">外观</button>
+        <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tab-notify" data-settings-tab="notify">通知</button>
+        <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tab-developer" data-settings-tab="developer">开发者</button>
+        <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tab-system" data-settings-tab="system">系统</button>
       </div>
-      <div class="settings-status" id="codex-status"></div>
 
-      <div class="settings-divider"></div>
+      <div class="settings-tab-panels">
+        <section class="settings-tab-panel active" id="settings-tab-cli" role="tabpanel" data-settings-panel="cli">
+          <div class="settings-section-title">CLI 安装状态</div>
+          <div id="cli-install-status-area"></div>
+        </section>
 
-      <div class="settings-section-title">CodeBuddy CLI 配置</div>
-      <div id="codebuddy-config-area"></div>
+        <section class="settings-tab-panel" id="settings-tab-ai" role="tabpanel" data-settings-panel="ai" hidden>
+          <div class="settings-section-title">Claude API 配置</div>
+          <div id="claude-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="model-save-btn">保存 Claude 配置</button>
+          </div>
+          <div class="settings-status" id="model-status"></div>
 
-      <div class="settings-divider"></div>
+          <div class="settings-divider"></div>
 
-      <div class="settings-section-title">Kimi CLI 配置</div>
-      <div id="kimi-config-area"></div>
-      <div class="settings-actions">
-        <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
+          <div class="settings-section-title">Codex API 配置</div>
+          <div id="codex-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
+          </div>
+          <div class="settings-status" id="codex-status"></div>
+
+          <div class="settings-divider"></div>
+
+          <div class="settings-section-title">CodeBuddy CLI 配置</div>
+          <div id="codebuddy-config-area"></div>
+
+          <div class="settings-divider"></div>
+
+          <div class="settings-section-title">Kimi CLI 配置</div>
+          <div id="kimi-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
+          </div>
+          <div class="settings-status" id="kimi-status"></div>
+        </section>
+
+        <section class="settings-tab-panel" id="settings-tab-appearance" role="tabpanel" data-settings-panel="appearance" hidden>
+          ${buildAppearanceEntryHtml()}
+        </section>
+
+        <section class="settings-tab-panel" id="settings-tab-notify" role="tabpanel" data-settings-panel="notify" hidden>
+          ${buildNotifyEntryHtml(null)}
+        </section>
+
+        <section class="settings-tab-panel" id="settings-tab-developer" role="tabpanel" data-settings-panel="developer" hidden>
+          <div class="settings-section-title">开发者</div>
+          <button class="settings-nav-card" type="button" data-open-dev-page>
+            <span class="settings-nav-card-main">
+              <span class="settings-nav-card-title">开发者设置</span>
+              <span class="settings-nav-card-meta">GitHub / SSH 配置</span>
+            </span>
+            <span class="settings-nav-card-arrow" aria-hidden="true">›</span>
+          </button>
+        </section>
+
+        <section class="settings-tab-panel" id="settings-tab-system" role="tabpanel" data-settings-panel="system" hidden>
+          <div class="settings-section-title">系统</div>
+          <div class="settings-actions" style="margin-top:0;flex-wrap:wrap;gap:10px">
+            <button class="btn-test" id="pw-open-modal-btn" style="padding:6px 16px">修改密码</button>
+            <button class="btn-test" id="check-update-btn" style="padding:6px 16px">检查更新</button>
+          </div>
+          <div class="settings-status" id="update-status" style="margin-top:8px"></div>
+        </section>
       </div>
-      <div class="settings-status" id="kimi-status"></div>
 
-      <div class="settings-divider"></div>
-
-      ${buildAppearanceEntryHtml()}
-
-      <div class="settings-divider"></div>
-
-      ${buildNotifyEntryHtml(null)}
-
-      <div class="settings-divider"></div>
-
-      <div class="settings-section-title">开发者</div>
-      <button class="settings-nav-card" type="button" data-open-dev-page>
-        <span class="settings-nav-card-main">
-          <span class="settings-nav-card-title">开发者设置</span>
-          <span class="settings-nav-card-meta">GitHub / SSH 配置</span>
-        </span>
-        <span class="settings-nav-card-arrow" aria-hidden="true">›</span>
-      </button>
-
-      <div class="settings-divider"></div>
-
-      <div class="settings-section-title">系统</div>
-      <div class="settings-actions" style="margin-top:0;flex-wrap:wrap;gap:10px">
-        <button class="btn-test" id="pw-open-modal-btn" style="padding:6px 16px">修改密码</button>
-        <button class="btn-test" id="check-update-btn" style="padding:6px 16px">检查更新</button>
-      </div>
-      <div class="settings-status" id="update-status" style="margin-top:8px"></div>
     `;
 
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+    const settingsTabs = panel.querySelectorAll('[data-settings-tab]');
+    const settingsTabPanels = panel.querySelectorAll('[data-settings-panel]');
+    const activateSettingsTab = (tabName) => {
+      settingsTabs.forEach((tab) => {
+        const active = tab.dataset.settingsTab === tabName;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+      });
+      settingsTabPanels.forEach((tabPanel) => {
+        const active = tabPanel.dataset.settingsPanel === tabName;
+        tabPanel.classList.toggle('active', active);
+        tabPanel.hidden = !active;
+      });
+    };
+    settingsTabs.forEach((tab) => {
+      tab.addEventListener('click', () => activateSettingsTab(tab.dataset.settingsTab));
+      tab.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const tabs = Array.from(settingsTabs);
+        const currentIndex = tabs.indexOf(tab);
+        const offset = event.key === 'ArrowRight' ? 1 : -1;
+        const nextTab = tabs[(currentIndex + offset + tabs.length) % tabs.length];
+        activateSettingsTab(nextTab.dataset.settingsTab);
+        nextTab.focus();
+      });
+    });
+    activateSettingsTab('cli');
     const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
     const themePageBtn = panel.querySelector('[data-open-theme-page]');
     if (themePageBtn) themePageBtn.addEventListener('click', openThemeSubpage);
