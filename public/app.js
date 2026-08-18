@@ -301,6 +301,7 @@
   let authToken = localStorage.getItem('cc-web-token');
   let currentSessionId = null;
   let sessions = [];
+  let projects = [];
   let sessionCache = new Map();
   let agentModelOptionsCache = new Map();
   let pendingAgentModelRequests = new Map();
@@ -1432,6 +1433,7 @@
       agent: normalizeAgent(payload.agent),
       hasUnread: !!payload.hasUnread,
       cwd: payload.cwd || null,
+      projectId: payload.projectId || null,
       totalCost: typeof payload.totalCost === 'number' ? payload.totalCost : 0,
       totalUsage: payload.totalUsage ? deepClone(payload.totalUsage) : null,
       updated: payload.updated || null,
@@ -1867,11 +1869,68 @@
     return parts[parts.length - 1] || normalized;
   }
 
+  function getProjectLocationKey(project) {
+    const taskMode = project?.taskMode === 'remote' ? 'remote' : 'local';
+    if (taskMode === 'remote') {
+      const hostId = String(project?.sshHostId || '').trim();
+      if (!hostId) return '';
+      return `remote:${hostId}:${String(project?.remoteCwd || '').trim()}`;
+    }
+    const cwd = String(project?.cwd || '').trim().replace(/[\\/]+$/, '');
+    if (!cwd) return '';
+    const comparable = /^[a-zA-Z]:[\\/]/.test(cwd) ? cwd.toLowerCase() : cwd;
+    return `local:${comparable}`;
+  }
+
+  function getProjectMeta(project) {
+    const taskMode = project?.taskMode === 'remote' ? 'remote' : 'local';
+    const cwd = taskMode === 'local' ? String(project?.cwd || '').trim() : '';
+    const remoteCwd = taskMode === 'remote' ? String(project?.remoteCwd || '').trim() : '';
+    const projectId = String(project?.id || '').trim();
+    const title = taskMode === 'remote'
+      ? `${project?.sshHostId || '远程主机'}${remoteCwd ? ` · ${remoteCwd}` : ' · SSH 默认目录'}`
+      : cwd;
+    return {
+      key: `project:${projectId}`,
+      projectId,
+      title: title || '未设置项目位置',
+      label: String(project?.name || '').trim() || getPathLeaf(remoteCwd || cwd) || '未命名项目',
+      cwd,
+      taskMode,
+      sshHostId: String(project?.sshHostId || ''),
+      remoteCwd,
+      updated: project?.updated || project?.created || null,
+    };
+  }
+
   function getSessionProjectMeta(session) {
+    const hasProjectId = Object.prototype.hasOwnProperty.call(session || {}, 'projectId');
+    const projectId = String(session?.projectId || '').trim();
+    if (projectId) {
+      const project = projects.find((item) => item.id === projectId);
+      if (project) return getProjectMeta(project);
+    }
+    if (hasProjectId) {
+      return {
+        key: UNGROUPED_PROJECT_KEY,
+        projectId: null,
+        title: '未绑定项目',
+        label: '未绑定项目',
+        cwd: '',
+        taskMode: 'local',
+        sshHostId: '',
+        remoteCwd: '',
+      };
+    }
+
+    const legacyProject = projects.find((project) => getProjectLocationKey(project) === getProjectLocationKey(session));
+    if (legacyProject) return getProjectMeta(legacyProject);
+
     const remoteCwd = String(session?.remoteCwd || '').trim();
     if (remoteCwd) {
       return {
-        key: `remote:${String(session?.sshHostId || '')}:${remoteCwd}`,
+        key: `legacy:remote:${String(session?.sshHostId || '')}:${remoteCwd}`,
+        projectId: null,
         title: remoteCwd,
         label: getPathLeaf(remoteCwd) || remoteCwd,
         cwd: remoteCwd,
@@ -1883,7 +1942,8 @@
     const cwd = String(session?.cwd || '').trim();
     if (cwd) {
       return {
-        key: `local:${cwd}`,
+        key: `legacy:local:${cwd}`,
+        projectId: null,
         title: cwd,
         label: getPathLeaf(cwd) || cwd,
         cwd,
@@ -1894,6 +1954,7 @@
     }
     return {
       key: UNGROUPED_PROJECT_KEY,
+      projectId: null,
       title: '未绑定项目地址',
       label: '未绑定项目',
       cwd: '',
@@ -1905,6 +1966,10 @@
 
   function groupSessionsByProject(list) {
     const groups = new Map();
+    projects.forEach((project) => {
+      const meta = getProjectMeta(project);
+      groups.set(meta.key, { ...meta, sessions: [] });
+    });
     for (const session of list) {
       const project = getSessionProjectMeta(session);
       if (!groups.has(project.key)) {
@@ -1913,8 +1978,8 @@
       groups.get(project.key).sessions.push(session);
     }
     return Array.from(groups.values()).sort((a, b) => {
-      const aUpdated = Math.max(...a.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
-      const bUpdated = Math.max(...b.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
+      const aUpdated = Math.max(new Date(a.updated || 0).getTime() || 0, ...a.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
+      const bUpdated = Math.max(new Date(b.updated || 0).getTime() || 0, ...b.sessions.map((session) => new Date(session.updated || 0).getTime() || 0));
       return bUpdated - aUpdated;
     });
   }
@@ -2060,6 +2125,7 @@
           agent: selectedAgent,
           mode: localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo',
           taskMode: 'remote',
+          projectId: project.projectId || null,
           sshHostId: project.sshHostId,
           remoteCwd: project.remoteCwd,
           codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '',
@@ -2069,6 +2135,7 @@
         send({
           type: 'new_session',
           cwd: project.cwd,
+          projectId: project.projectId || null,
           agent: selectedAgent,
           mode: localStorage.getItem(getAgentModeStorageKey(selectedAgent)) || 'yolo',
           taskMode: 'local',
@@ -3230,6 +3297,7 @@
 
       case 'session_list':
         sessions = msg.sessions || [];
+        projects = Array.isArray(msg.projects) ? msg.projects : [];
         reconcileSessionCacheWithSessions();
         renderSessionList();
         if (currentSessionId) {
@@ -5357,7 +5425,7 @@
       </button>
       <div class="session-project-actions">
         <button class="session-project-action-btn session-project-new-btn" type="button" title="在此项目中新建对话" aria-label="在此项目中新建对话" ${group.key === UNGROUPED_PROJECT_KEY ? 'disabled' : ''}>+</button>
-        <button class="session-project-action-btn session-project-clear-btn" type="button" title="清空此项目的对话" aria-label="清空此项目的对话">
+        <button class="session-project-action-btn session-project-clear-btn" type="button" title="清空此项目的对话" aria-label="清空此项目的对话" ${group.sessions.length === 0 ? 'disabled' : ''}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path>
           </svg>
@@ -5378,6 +5446,9 @@
     if (!collapsed) {
       const body = document.createElement('div');
       body.className = 'session-project-body';
+      if (group.sessions.length === 0) {
+        body.innerHTML = '<div class="session-project-empty">暂无对话</div>';
+      }
       const displayLimit = projectSessionDisplayLimits.get(group.key) || INITIAL_PROJECT_SESSION_COUNT;
       group.sessions.slice(0, displayLimit).forEach((session) => body.appendChild(createSessionItemElement(session)));
       if (displayLimit < group.sessions.length) {
@@ -5399,10 +5470,10 @@
     const visibleSessions = getVisibleSessions();
     syncSelectedSessionsWithVisible();
     updateSessionBulkActionBar();
-    if (visibleSessions.length === 0) {
+    if (visibleSessions.length === 0 && projects.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'session-list-empty';
-      empty.textContent = '暂无对话，点击“新项目”开始。';
+      empty.textContent = '暂无项目或对话，点击“新项目”或“新对话”开始。';
       sessionList.appendChild(empty);
       return;
     }
@@ -6043,8 +6114,8 @@
     });
   }
 
-  newChatBtn.addEventListener('click', showCurrentProjectNewSessionModal);
-  newProjectBtn.addEventListener('click', () => showNewSessionModal());
+  newChatBtn.addEventListener('click', () => showNewSessionModal());
+  newProjectBtn.addEventListener('click', () => showNewSessionModal({ projectOnly: true }));
   importChatBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (importChatBtn.hidden) return;
@@ -8405,7 +8476,8 @@
     });
   }
 
-  function showNewSessionModal() {
+  function showNewSessionModal(options = {}) {
+    const projectOnly = options.projectOnly === true;
     const agentOrder = ['codex', 'opencode', 'codebuddy', 'kimi', 'claude'];
     const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
       const aIndex = agentOrder.indexOf(a.id);
@@ -8416,9 +8488,9 @@
       if (agentId === 'claude') return 'Claude Code';
       return getAgentDefinition(agentId)?.label || 'Agent';
     };
-    let selectedAgent = normalizeAgent(currentAgent);
+    let selectedAgent = projectOnly ? DEFAULT_AGENT : normalizeAgent(currentAgent);
     let selectedCodebuddyProfile = '';
-    const initialLabel = getNewSessionAgentLabel(selectedAgent);
+    const initialLabel = projectOnly ? '项目' : getNewSessionAgentLabel(selectedAgent);
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.id = 'new-session-overlay';
@@ -8426,16 +8498,23 @@
     overlay.innerHTML = `
       <div class="modal-panel modal-panel-wide">
         <div class="modal-header">
-          <span class="modal-title" id="ns-title">新建 ${escapeHtml(initialLabel)} 会话</span>
+          <span class="modal-title" id="ns-title">${projectOnly ? '新建项目' : `新建 ${escapeHtml(initialLabel)} 会话`}</span>
           <button class="modal-close-btn" id="ns-close-btn">✕</button>
         </div>
         <div class="modal-body">
-          <div>
-            <div class="modal-field-label" style="margin-bottom:6px">选择 Agent</div>
-            <div class="ns-agent-grid" id="ns-agent-grid"></div>
-          </div>
+          ${projectOnly ? `
+            <div>
+              <div class="modal-field-label" style="margin-bottom:6px">项目名称</div>
+              <input type="text" id="ns-project-name" class="modal-text-input" placeholder="输入项目名称" maxlength="100">
+            </div>
+          ` : `
+            <div>
+              <div class="modal-field-label" style="margin-bottom:6px">选择 Agent</div>
+              <div class="ns-agent-grid" id="ns-agent-grid"></div>
+            </div>
+          `}
           <div class="agent-context-card" style="margin-bottom:12px">
-            <div class="agent-context-kicker" id="ns-task-label">${escapeHtml(initialLabel)} · 本地任务</div>
+            <div class="agent-context-kicker" id="ns-task-label">${projectOnly ? '项目' : escapeHtml(initialLabel)} · 本地任务</div>
           </div>
           <div style="display:flex;gap:8px;margin-bottom:12px">
             <button class="btn-test ns-task-tab active" id="ns-tab-local" style="flex:1;padding:6px 12px">本地任务</button>
@@ -8464,7 +8543,7 @@
     const taskLabel = overlay.querySelector('#ns-task-label');
 
     function getSelectedAgentLabel() {
-      return getNewSessionAgentLabel(selectedAgent);
+      return projectOnly ? '项目' : getNewSessionAgentLabel(selectedAgent);
     }
 
     function getSelectedAgentMode() {
@@ -8538,12 +8617,12 @@
       tabRemote.style.opacity = tab === 'remote' ? '1' : '0.6';
       localView.style.display = tab === 'local' ? '' : 'none';
       remoteView.style.display = tab === 'remote' ? '' : 'none';
-      if (titleEl) titleEl.textContent = `新建 ${getSelectedAgentLabel()} 会话`;
+      if (titleEl) titleEl.textContent = projectOnly ? '新建项目' : `新建 ${getSelectedAgentLabel()} 会话`;
       taskLabel.textContent = getSelectedAgentLabel() + (tab === 'local' ? ' · 本地任务' : ' · 远程任务');
     }
     tabLocal.addEventListener('click', () => switchTab('local'));
     tabRemote.addEventListener('click', () => switchTab('remote'));
-    renderAgentOptions();
+    if (!projectOnly) renderAgentOptions();
     switchTab('local');
     syncSelectedCodebuddyProfile();
 
@@ -8835,6 +8914,17 @@
           alert('请选择或输入工作目录');
           return;
         }
+        if (projectOnly) {
+          const name = overlay.querySelector('#ns-project-name')?.value?.trim() || getPathLeaf(cwd);
+          if (!name) {
+            alert('请输入项目名称');
+            return;
+          }
+          close();
+          saveRecentCwd(cwd);
+          send({ type: 'new_project', name, cwd, taskMode: 'local' });
+          return;
+        }
         close();
         saveRecentCwd(cwd);
         send({ type: 'new_session', cwd, agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'local', codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '' });
@@ -8845,6 +8935,13 @@
           return;
         }
         const remoteCwd = remoteView.querySelector('#ns-remote-cwd')?.value?.trim() || '';
+        if (projectOnly) {
+          const host = sshHosts.find((item) => item.id === selectedHostId);
+          const name = overlay.querySelector('#ns-project-name')?.value?.trim() || getPathLeaf(remoteCwd) || host?.name || '远程项目';
+          close();
+          send({ type: 'new_project', name, taskMode: 'remote', sshHostId: selectedHostId, remoteCwd });
+          return;
+        }
         close();
         send({ type: 'new_session', agent: selectedAgent, mode: getSelectedAgentMode(), taskMode: 'remote', sshHostId: selectedHostId, remoteCwd, codebuddyProfile: selectedAgent === 'codebuddy' ? selectedCodebuddyProfile : '' });
       }

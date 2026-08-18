@@ -380,8 +380,15 @@ async function main() {
 
     const codexInitCwd = path.join(tempRoot, 'codex-space');
     mkdirp(codexInitCwd);
+    ws.send(JSON.stringify({ type: 'new_project', name: '空项目回归测试', taskMode: 'local', cwd: codexInitCwd }));
+    const emptyProjectInfo = await nextMessage(messages, ws, (msg) => msg.type === 'project_info' && msg.project?.name === '空项目回归测试');
+    const emptyProjectList = await nextMessage(messages, ws, (msg) => msg.type === 'session_list' && msg.projects?.some((project) => project.id === emptyProjectInfo.project.id));
+    assert(emptyProjectList.projects.some((project) => project.id === emptyProjectInfo.project.id), 'New project should be listed before any session exists');
+    assert(!emptyProjectList.sessions.some((session) => session.projectId === emptyProjectInfo.project.id), 'New project should not create a session');
+
     ws.send(JSON.stringify({ type: 'new_session', agent: 'codex', cwd: codexInitCwd, mode: 'plan' }));
     const codexSession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'codex' && msg.cwd === codexInitCwd);
+    assert(codexSession.projectId === null, 'New conversation should remain independent without an explicit project');
     assert(codexSession.mode === 'plan', 'Codex new_session should follow requested mode');
     assert(codexSession.model === 'gpt-5.4', 'Codex new_session should inject default model gpt-5.4');
 
@@ -690,6 +697,10 @@ async function main() {
     assert(!fs.existsSync(path.join(sessionsDir, `${importedSessionId}.json`)), 'Deleting Codex session did not remove session JSON');
     assert(!fs.existsSync(codexFixture.rolloutPath), 'Deleting Codex session did not remove rollout file');
     assert(sql(codexFixture.stateDb, `select count(*) from threads where id='${codexFixture.threadId}'`) === '0', 'Deleting Codex session did not remove thread row');
+
+    ws.send(JSON.stringify({ type: 'new_session', agent: 'codex', cwd: codexInitCwd, projectId: emptyProjectInfo.project.id, mode: 'plan' }));
+    const projectCodexSession = await nextMessage(messages, ws, (msg) => msg.type === 'session_info' && msg.agent === 'codex' && msg.projectId === emptyProjectInfo.project.id);
+    assert(projectCodexSession.projectId === emptyProjectInfo.project.id, 'Conversation should join a project only when projectId is explicit');
 
     ws.close();
     console.log('Regression checks passed.');

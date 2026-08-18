@@ -223,6 +223,7 @@ const CODEBUDDY_CONFIG_PATH = path.join(CONFIG_DIR, 'codebuddy.json');
 const KIMI_CONFIG_PATH = path.join(CONFIG_DIR, 'kimi.json');
 const AGENT_MODEL_PREFERENCES_PATH = path.join(CONFIG_DIR, 'agent-models.json');
 const BANNED_IPS_PATH = path.join(CONFIG_DIR, 'banned_ips.json');
+const PROJECTS_PATH = path.join(CONFIG_DIR, 'projects.json');
 
 fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -1769,7 +1770,135 @@ function loadSession(id) {
 
 function saveSession(session) {
   normalizeSession(session);
+  ensureSessionProject(session);
   fs.writeFileSync(sessionPath(session.id), JSON.stringify(session, null, 2));
+}
+
+function getProjectPathLeaf(value) {
+  const normalized = String(value || '').trim().replace(/[\\/]+$/, '');
+  if (!normalized) return '';
+  const parts = normalized.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || normalized;
+}
+
+function getProjectLocationKey(input = {}) {
+  const taskMode = input.taskMode === 'remote' ? 'remote' : 'local';
+  if (taskMode === 'remote') {
+    const hostId = String(input.sshHostId || '').trim();
+    if (!hostId) return '';
+    return `remote:${hostId}:${String(input.remoteCwd || '').trim()}`;
+  }
+  const cwd = String(input.cwd || '').trim();
+  if (!cwd) return '';
+  try {
+    const resolved = path.resolve(cwd);
+    return `local:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
+  } catch {
+    return '';
+  }
+}
+
+function normalizeProject(project) {
+  if (!project || typeof project !== 'object') return null;
+  const taskMode = project.taskMode === 'remote' ? 'remote' : 'local';
+  const cwd = taskMode === 'local' ? String(project.cwd || '').trim() : '';
+  const remoteCwd = taskMode === 'remote' ? String(project.remoteCwd || '').trim() : '';
+  const sshHostId = taskMode === 'remote' ? String(project.sshHostId || '').trim() : '';
+  const id = sanitizeId(project.id || '');
+  if (!id || !getProjectLocationKey({ taskMode, cwd, sshHostId, remoteCwd })) return null;
+  const fallbackName = getProjectPathLeaf(taskMode === 'remote' ? remoteCwd : cwd) || '未命名项目';
+  const name = sanitizeUnicodeText(project.name || '').trim().slice(0, 100) || fallbackName;
+  const created = project.created || new Date().toISOString();
+  return {
+    id,
+    name,
+    cwd,
+    taskMode,
+    sshHostId,
+    remoteCwd,
+    created,
+    updated: project.updated || created,
+  };
+}
+
+function loadProjects() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PROJECTS_PATH, 'utf8'));
+    const source = Array.isArray(raw) ? raw : raw?.projects;
+    if (!Array.isArray(source)) return [];
+    const seenIds = new Set();
+    const seenLocations = new Set();
+    return source.map(normalizeProject).filter((project) => {
+      if (!project) return false;
+      const locationKey = getProjectLocationKey(project);
+      if (seenIds.has(project.id) || seenLocations.has(locationKey)) return false;
+      seenIds.add(project.id);
+      seenLocations.add(locationKey);
+      return true;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveProjects(projects) {
+  const normalized = [];
+  const seenIds = new Set();
+  const seenLocations = new Set();
+  for (const project of projects || []) {
+    const next = normalizeProject(project);
+    if (!next) continue;
+    const locationKey = getProjectLocationKey(next);
+    if (seenIds.has(next.id) || seenLocations.has(locationKey)) continue;
+    seenIds.add(next.id);
+    seenLocations.add(locationKey);
+    normalized.push(next);
+  }
+  fs.writeFileSync(PROJECTS_PATH, JSON.stringify(normalized, null, 2));
+  return normalized;
+}
+
+function findProjectForSession(session, projects = loadProjects()) {
+  const locationKey = getProjectLocationKey(session);
+  if (!locationKey) return null;
+  return projects.find((project) => getProjectLocationKey(project) === locationKey) || null;
+}
+
+function ensureSessionProject(session) {
+  if (!session || Object.prototype.hasOwnProperty.call(session, 'projectId')) return;
+  const projects = loadProjects();
+  let project = findProjectForSession(session, projects);
+  if (!project) {
+    const locationKey = getProjectLocationKey(session);
+    if (locationKey) {
+      const now = new Date().toISOString();
+      project = normalizeProject({
+        id: crypto.randomUUID(),
+        name: getProjectPathLeaf(session.taskMode === 'remote' ? session.remoteCwd : session.cwd) || '未命名项目',
+        cwd: session.cwd,
+        taskMode: session.taskMode,
+        sshHostId: session.sshHostId,
+        remoteCwd: session.remoteCwd,
+        created: now,
+        updated: now,
+      });
+      if (project) saveProjects([...projects, project]);
+    }
+  }
+  session.projectId = project?.id || null;
+}
+
+function migrateLegacySessionsToProjects() {
+  try {
+    for (const file of fs.readdirSync(SESSIONS_DIR).filter((entry) => entry.endsWith('.json'))) {
+      try {
+        const session = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, file), 'utf8'));
+        if (session && typeof session === 'object' && !Object.prototype.hasOwnProperty.call(session, 'projectId')) {
+          saveSession(session);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 function normalizeAssistantContent(value) {
@@ -2354,6 +2483,7 @@ function sendSessionList(ws) {
         sessions.push({
           id: s.id,
           title: s.title || 'Untitled',
+          projectId: s.projectId || null,
           cwd: s.cwd || '',
           remoteCwd: s.remoteCwd || '',
           taskMode: s.taskMode || 'local',
@@ -2366,9 +2496,9 @@ function sendSessionList(ws) {
       } catch {}
     }
     sessions.sort((a, b) => new Date(b.updated) - new Date(a.updated));
-    wsSend(ws, { type: 'session_list', sessions });
+    wsSend(ws, { type: 'session_list', sessions, projects: loadProjects() });
   } catch {
-    wsSend(ws, { type: 'session_list', sessions: [] });
+    wsSend(ws, { type: 'session_list', sessions: [], projects: loadProjects() });
   }
 }
 
@@ -3513,6 +3643,9 @@ wss.on('connection', (ws, req) => {
       case 'new_session':
         handleNewSession(ws, msg);
         break;
+      case 'new_project':
+        handleNewProject(ws, msg);
+        break;
       case 'load_session':
         handleLoadSession(ws, msg.sessionId);
         break;
@@ -4230,6 +4363,7 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
           model: sessionModelLabel(session),
           agent: getSessionAgent(session),
           cwd: session.cwd || null,
+          projectId: session.projectId || null,
           totalCost: session.totalCost || 0,
           totalUsage: session.totalUsage || null,
           taskMode: session.taskMode || 'local',
@@ -4468,16 +4602,74 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
 }
 
 // === Session Handlers ===
+function handleNewProject(ws, msg) {
+  const taskMode = msg?.taskMode === 'remote' ? 'remote' : 'local';
+  const name = sanitizeUnicodeText(msg?.name || '').trim().slice(0, 100);
+  const cwd = taskMode === 'local' ? String(msg?.cwd || '').trim() : '';
+  const sshHostId = taskMode === 'remote' ? String(msg?.sshHostId || '').trim() : '';
+  const remoteCwd = taskMode === 'remote' ? String(msg?.remoteCwd || '').trim() : '';
+
+  if (taskMode === 'local' && !cwd) {
+    return wsSend(ws, { type: 'error', message: '请选择项目目录' });
+  }
+  if (taskMode === 'remote' && !sshHostId) {
+    return wsSend(ws, { type: 'error', message: '请选择 SSH 主机' });
+  }
+  if (taskMode === 'remote') {
+    const devConfig = loadDevConfig();
+    if (!(devConfig.ssh.hosts || []).some((host) => host.id === sshHostId)) {
+      return wsSend(ws, { type: 'error', message: 'SSH 主机不存在或已被删除' });
+    }
+  }
+
+  const location = { taskMode, cwd, sshHostId, remoteCwd };
+  const projects = loadProjects();
+  const existing = projects.find((project) => getProjectLocationKey(project) === getProjectLocationKey(location));
+  if (existing) {
+    wsSend(ws, { type: 'project_info', project: existing });
+    return sendSessionList(ws);
+  }
+
+  const now = new Date().toISOString();
+  const project = normalizeProject({
+    id: crypto.randomUUID(),
+    name: name || getProjectPathLeaf(taskMode === 'remote' ? remoteCwd : cwd) || '未命名项目',
+    cwd,
+    taskMode,
+    sshHostId,
+    remoteCwd,
+    created: now,
+    updated: now,
+  });
+  if (!project) {
+    return wsSend(ws, { type: 'error', message: '项目位置无效，无法创建项目' });
+  }
+  saveProjects([...projects, project]);
+  wsSend(ws, { type: 'project_info', project });
+  sendSessionList(ws);
+}
+
 function handleNewSession(ws, msg) {
   const cwd = (msg && msg.cwd) ? String(msg.cwd) : null;
   const agent = normalizeAgent(msg?.agent);
   const requestedMode = ['default', 'plan', 'yolo'].includes(msg?.mode) ? msg.mode : 'yolo';
-  const taskMode = msg?.taskMode === 'remote' ? 'remote' : 'local';
-  const sshHostId = String(msg?.sshHostId || '').trim();
-  const remoteCwd = String(msg?.remoteCwd || '').trim();
+  let taskMode = msg?.taskMode === 'remote' ? 'remote' : 'local';
+  let sshHostId = String(msg?.sshHostId || '').trim();
+  let remoteCwd = String(msg?.remoteCwd || '').trim();
   const requestedCodebuddyProfile = String(msg?.codebuddyProfile || '').trim();
+  const requestedProjectId = sanitizeId(msg?.projectId || '');
+  const project = requestedProjectId ? loadProjects().find((item) => item.id === requestedProjectId) : null;
+  if (requestedProjectId && !project) {
+    return wsSend(ws, { type: 'error', message: '目标项目不存在或已被删除' });
+  }
 
-  let resolvedCwd = cwd || resolveAgentDefaultCwd(agent);
+  if (project) {
+    taskMode = project.taskMode;
+    sshHostId = project.sshHostId;
+    remoteCwd = project.remoteCwd;
+  }
+
+  let resolvedCwd = project?.taskMode === 'local' ? project.cwd : (cwd || resolveAgentDefaultCwd(agent));
   let hostInfo = null;
 
   // Remote task: create host-specific directory and inject host info
@@ -4506,6 +4698,7 @@ function handleNewSession(ws, msg) {
     totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
     messages: [],
     cwd: resolvedCwd,
+    projectId: project?.id || null,
     taskMode,
     sshHostId: taskMode === 'remote' ? sshHostId : '',
     remoteCwd: taskMode === 'remote' ? remoteCwd : '',
@@ -4531,6 +4724,7 @@ function handleNewSession(ws, msg) {
     model: sessionModelLabel(session),
     agent,
     cwd: session.cwd,
+    projectId: session.projectId || null,
     totalCost: 0,
     totalUsage: session.totalUsage,
     updated: session.updated,
@@ -4627,6 +4821,7 @@ function handleLoadSession(ws, sessionId) {
     agent: getSessionAgent(session),
     hasUnread: hadUnread,
     cwd: effectiveCwd,
+    projectId: session.projectId || null,
     totalCost: session.totalCost || 0,
     totalUsage: session.totalUsage || null,
     historyTotal: session.messages.length,
@@ -4983,6 +5178,7 @@ function handleMessage(ws, msg, options = {}) {
       totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       messages: [],
       cwd: resolvedCwd,
+      projectId: null,
     };
   }
   normalizeSession(session);
@@ -5032,6 +5228,7 @@ function handleMessage(ws, msg, options = {}) {
       model: sessionModelLabel(session),
       agent: getSessionAgent(session),
       cwd: session.cwd || null,
+      projectId: session.projectId || null,
       totalCost: session.totalCost || 0,
       totalUsage: session.totalUsage || null,
       updated: session.updated,
@@ -6755,6 +6952,7 @@ function handleImportNativeSession(ws, msg) {
     model: sessionModelLabel(session),
     agent: getSessionAgent(session),
     cwd: session.cwd,
+    projectId: session.projectId || null,
     totalCost: session.totalCost || 0,
     totalUsage: session.totalUsage || null,
     updated: session.updated,
@@ -6861,6 +7059,7 @@ function handleImportCodexSession(ws, msg) {
     model: sessionModelLabel(session),
     agent: getSessionAgent(session),
     cwd: session.cwd,
+    projectId: session.projectId || null,
     totalCost: session.totalCost || 0,
     totalUsage: session.totalUsage || null,
     updated: session.updated,
@@ -6945,6 +7144,7 @@ function handleImportOpencodeSession(ws, msg) {
     model: sessionModelLabel(session),
     agent: getSessionAgent(session),
     cwd: session.cwd,
+    projectId: session.projectId || null,
     totalCost: session.totalCost || 0,
     totalUsage: session.totalUsage || null,
     updated: session.updated,
@@ -7221,6 +7421,7 @@ function handleBrowseDirectories(ws, msg) {
 recoverProcesses();
 repairImportedSessionUpdatedAt();
 repairDuplicateAssistantMessages();
+migrateLegacySessionsToProjects();
 
 // Periodic heartbeat: log active processes status every 60s
 setInterval(() => {

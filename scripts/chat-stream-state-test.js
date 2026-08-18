@@ -79,6 +79,7 @@ assert.deepStrictEqual(updates, [{ id: 'pending-tool', result: pendingResult }])
 const sentMessages = [];
 const runtime = createAgentRuntime({
   processEnv: {},
+  CLAUDE_PATH: 'claude',
   MODEL_MAP: {},
   loadModelConfig() { return {}; },
   wsSend(_ws, message) { sentMessages.push(message); },
@@ -90,6 +91,17 @@ const runtime = createAgentRuntime({
   getRuntimeSessionId() { return ''; },
   getGitWorkingTreeStats() { return new Map(); },
 });
+const claudeSpawnSpec = runtime.buildClaudeSpawnSpec({
+  permissionMode: 'yolo',
+  cwd: process.cwd(),
+});
+if (process.platform === 'win32') {
+  assert.strictEqual(claudeSpawnSpec.command, 'cmd.exe');
+  assert.strictEqual(claudeSpawnSpec.args[0], '/d');
+  assert.ok(claudeSpawnSpec.args[3].startsWith('claude -p '));
+} else {
+  assert.strictEqual(claudeSpawnSpec.command, 'claude');
+}
 const runtimeEntry = {
   agent: 'codex',
   ws: {},

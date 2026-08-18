@@ -873,6 +873,11 @@ body.session-loading-active {
   border-left: 1px solid rgba(91, 126, 161, 0.12);
   margin-left: 10px;
 }
+.session-project-empty {
+  padding: 12px 16px 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
 .session-project-show-more {
   width: 100%;
   min-height: 30px;
