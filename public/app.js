@@ -2215,8 +2215,9 @@
   function getCacheRate(usage) {
     const inputTokens = normalizeTokenCount(usage?.inputTokens);
     const cachedInputTokens = normalizeTokenCount(usage?.cachedInputTokens);
-    if (!inputTokens) return 0;
-    return Math.min((cachedInputTokens / inputTokens) * 100, 100);
+    const totalInputTokens = inputTokens + cachedInputTokens;
+    if (!totalInputTokens) return 0;
+    return Math.min((cachedInputTokens / totalInputTokens) * 100, 100);
   }
 
   function formatTokenUsageDisplay(usage) {

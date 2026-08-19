@@ -1740,6 +1740,9 @@ function normalizeSession(session) {
   if (!Object.prototype.hasOwnProperty.call(session.totalUsage, 'contextTokens')) {
     session.totalUsage.contextTokens = 0;
   }
+  if (!Object.prototype.hasOwnProperty.call(session.totalUsage, 'cacheCreationInputTokens')) {
+    session.totalUsage.cacheCreationInputTokens = 0;
+  }
   if (!Object.prototype.hasOwnProperty.call(session, 'taskMode')) session.taskMode = 'local';
   if (!Object.prototype.hasOwnProperty.call(session, 'sshHostId')) session.sshHostId = '';
   if (!Object.prototype.hasOwnProperty.call(session, 'remoteCwd')) session.remoteCwd = '';
@@ -2028,7 +2031,8 @@ function formatUsageSummary(usage) {
   const inputTokens = Math.max(0, Number(usage?.inputTokens) || 0);
   const cachedInputTokens = Math.max(0, Number(usage?.cachedInputTokens) || 0);
   const outputTokens = Math.max(0, Number(usage?.outputTokens) || 0);
-  const cacheRate = inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : 0;
+  const totalInputTokens = inputTokens + cachedInputTokens;
+  const cacheRate = totalInputTokens > 0 ? (cachedInputTokens / totalInputTokens) * 100 : 0;
   return `当前会话累计 Token：输入 ${inputTokens}，缓存读取 ${cachedInputTokens}，输出 ${outputTokens}，缓存率 ${cacheRate.toFixed(1)}%`;
 }
 
