@@ -324,6 +324,7 @@
   let currentTheme = (document.documentElement.dataset.theme || localStorage.getItem('cc-web-theme') || 'washi');
   let currentFont = (document.documentElement.dataset.font || localStorage.getItem('cc-web-font') || 'system');
   let codexConfigCache = null;
+  let aiConfigCache = null;
   let codebuddyConfigCache = null;
   let loadedHistorySessionId = null;
   let historyLoadState = { sessionId: null, loading: false, hasMore: false };
@@ -1430,6 +1431,9 @@
       title: payload.title || '新会话',
       mode: payload.mode || 'yolo',
       model: payload.model || '',
+      aiProviderId: payload.aiProviderId || '',
+      aiModelId: payload.aiModelId || '',
+      reasoningEffort: payload.reasoningEffort || '',
       agent: normalizeAgent(payload.agent),
       hasUnread: !!payload.hasUnread,
       cwd: payload.cwd || null,
@@ -2668,6 +2672,29 @@
     const agentSpec = getAgentDefinition(currentAgent);
     const modelControl = agentSpec?.modelControl || null;
 
+    if (currentAgent === 'claude' || currentAgent === 'codex') {
+      const separator = String(currentModel || '').indexOf('/');
+      const providerId = separator > 0 ? currentModel.slice(0, separator) : '';
+      const modelId = separator > 0 ? currentModel.slice(separator + 1) : currentModel;
+      const provider = (aiConfigCache?.providers || []).find((item) => item.id === providerId && item.agent === currentAgent);
+      const model = provider?.models?.find((item) => item.id === modelId);
+      modelPickerBtn.hidden = false;
+      modelPickerBtn.disabled = !hasSession;
+      modelPickerBtn.textContent = model ? `${provider.name} · ${model.label || model.id}` : (currentModel || '选择模型');
+      modelPickerBtn.title = hasSession ? `当前模型: ${currentModel || '未选择'}` : '请先打开或创建一个会话';
+      if (currentAgent === 'codex') {
+        const effort = getSessionMeta(currentSessionId)?.reasoningEffort || 'medium';
+        thinkingPickerBtn.hidden = false;
+        thinkingPickerBtn.disabled = !hasSession;
+        thinkingPickerBtn.textContent = effort;
+      } else {
+        thinkingPickerBtn.hidden = true;
+        thinkingPickerBtn.disabled = true;
+      }
+      updateContextUsageDisplay();
+      return;
+    }
+
     if (!modelControl) {
       modelPickerBtn.hidden = true;
       modelPickerBtn.disabled = true;
@@ -3271,6 +3298,7 @@
           app.hidden = false;
           restoreGitPanelOpenState();
           send({ type: 'get_codex_config' });
+          send({ type: 'get_ai_config' });
           // Check if must change password
           if (msg.mustChangePassword) {
             showForceChangePassword();
@@ -3471,13 +3499,21 @@
         if (msg.sessionId && msg.sessionId !== currentSessionId) break;
         if (msg.model) {
           currentModel = msg.model;
+          const targetSessionId = msg.sessionId || currentSessionId;
           sessions = sessions.map((session) =>
-            normalizeAgent(session.agent) === currentAgent ? { ...session, model: msg.model } : session
+            session.id === targetSessionId ? { ...session, model: msg.model, aiProviderId: msg.aiProviderId || session.aiProviderId, aiModelId: msg.aiModelId || session.aiModelId, reasoningEffort: msg.reasoningEffort || session.reasoningEffort } : session
           );
           for (const [sessionId, entry] of sessionCache) {
-            if (normalizeAgent(entry.snapshot?.agent) !== currentAgent) continue;
+            if (sessionId !== targetSessionId) continue;
             updateCachedSession(sessionId, (snapshot) => { snapshot.model = msg.model; });
           }
+        }
+        if (msg.sessionId === currentSessionId) {
+          updateCachedSession(currentSessionId, (snapshot) => {
+            if (msg.aiProviderId) snapshot.aiProviderId = msg.aiProviderId;
+            if (msg.aiModelId) snapshot.aiModelId = msg.aiModelId;
+            if (msg.reasoningEffort) snapshot.reasoningEffort = msg.reasoningEffort;
+          });
         }
         updateModelControls();
         break;
@@ -3555,6 +3591,12 @@
       case 'model_config':
         if (typeof _onModelConfig === 'function') _onModelConfig(msg.config);
         updateContextUsageDisplay();
+        break;
+
+      case 'ai_config':
+        aiConfigCache = msg.config || null;
+        if (typeof _onAiConfig === 'function') _onAiConfig(aiConfigCache);
+        updateModelControls();
         break;
 
       case 'codex_config':
@@ -6010,6 +6052,10 @@
   if (modelPickerBtn) {
     modelPickerBtn.addEventListener('click', () => {
       if (!currentSessionId) return;
+      if (currentAgent === 'claude' || currentAgent === 'codex') {
+        showAiSelectionPicker();
+        return;
+      }
       if (getAgentModelControl(currentAgent)?.kind === 'reasoning') {
         showCodexCombinedPicker();
         return;
@@ -6020,9 +6066,50 @@
 
   if (thinkingPickerBtn) {
     thinkingPickerBtn.addEventListener('click', () => {
-      if (!currentSessionId || getAgentModelControl(currentAgent)?.kind !== 'reasoning') return;
-      showCodexCombinedPicker();
+      if (!currentSessionId || currentAgent !== 'codex') return;
+      showAiSelectionPicker();
     });
+  }
+
+  function showAiSelectionPicker() {
+    if (!currentSessionId || !aiConfigCache) {
+      send({ type: 'get_ai_config' });
+      showToast('正在加载 AI 配置，请稍后重试');
+      return;
+    }
+    const providers = (aiConfigCache.providers || []).filter((provider) => provider.agent === currentAgent);
+    const choices = providers.flatMap((provider) => (provider.models || []).map((model) => ({
+      value: `${provider.id}/${model.id}`,
+      label: `${provider.name} · ${model.label || model.id}`,
+      desc: model.id,
+    })));
+    if (choices.length === 0) return showToast('当前 Agent 尚未配置模型');
+    const current = currentModel || choices[0].value;
+    const level = currentSessionId ? (getSessionMeta(currentSessionId)?.reasoningEffort || 'medium') : 'medium';
+    if (currentAgent !== 'codex') {
+      showOptionPicker('选择提供方与模型', choices, current, (value) => {
+        const split = value.indexOf('/');
+        send({ type: 'set_ai_selection', sessionId: currentSessionId, agent: currentAgent, providerId: value.slice(0, split), modelId: value.slice(split + 1) });
+      });
+      return;
+    }
+    hideOptionPicker();
+    const overlay = document.createElement('div');
+    overlay.className = 'option-picker-overlay';
+    const picker = document.createElement('div');
+    picker.className = 'option-picker option-picker-combined';
+    let selected = choices.some((item) => item.value === current) ? current : choices[0].value;
+    let selectedLevel = ['low', 'medium', 'high', 'xhigh'].includes(level) ? level : 'medium';
+    picker.innerHTML = `<header class="option-picker-header"><div><div class="option-picker-title">提供方、模型与思考强度</div><div class="option-picker-subtitle">当前会话可直接切换，下一轮请求生效</div></div><button class="option-picker-close" type="button" aria-label="关闭">×</button></header><div class="option-picker-config-body"><section class="option-picker-config-section"><div class="option-picker-section-title">模型</div><div class="option-picker-model-grid">${choices.map((item) => `<button class="option-picker-choice${item.value === selected ? ' active' : ''}" type="button" data-ai-model="${escapeHtml(item.value)}"><span class="option-picker-choice-label">${escapeHtml(item.label)}</span><span class="option-picker-choice-desc">${escapeHtml(item.desc)}</span><span class="option-picker-choice-mark">✓</span></button>`).join('')}</div></section><section class="option-picker-config-section"><div class="option-picker-section-title">Thinking</div><div class="option-picker-effort-grid">${['low', 'medium', 'high', 'xhigh'].map((item) => `<button class="option-picker-effort${item === selectedLevel ? ' active' : ''}" type="button" data-ai-effort="${item}"><span>${item}</span></button>`).join('')}</div></section></div><footer class="option-picker-footer"><button class="option-picker-cancel" type="button">取消</button><button class="option-picker-confirm" type="button">应用</button></footer>`;
+    overlay.appendChild(picker);
+    document.body.appendChild(overlay);
+    picker.querySelectorAll('[data-ai-model]').forEach((button) => button.addEventListener('click', () => { selected = button.dataset.aiModel; picker.querySelectorAll('[data-ai-model]').forEach((item) => item.classList.toggle('active', item === button)); }));
+    picker.querySelectorAll('[data-ai-effort]').forEach((button) => button.addEventListener('click', () => { selectedLevel = button.dataset.aiEffort; picker.querySelectorAll('[data-ai-effort]').forEach((item) => item.classList.toggle('active', item === button)); }));
+    const close = () => { overlay.remove(); document.removeEventListener('keydown', _pickerEscape); };
+    picker.querySelector('.option-picker-close').addEventListener('click', close);
+    picker.querySelector('.option-picker-cancel').addEventListener('click', close);
+    picker.querySelector('.option-picker-confirm').addEventListener('click', () => { const split = selected.indexOf('/'); close(); send({ type: 'set_ai_selection', sessionId: currentSessionId, agent: currentAgent, providerId: selected.slice(0, split), modelId: selected.slice(split + 1), reasoningEffort: selectedLevel }); });
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
   }
 
   function showCodexCombinedPicker() {
@@ -6320,6 +6407,7 @@
   let _onNotifyConfig = null;
   let _onNotifyTestResult = null;
   let _onModelConfig = null;
+  let _onAiConfig = null;
   let _onCodexConfig = null;
   let _onCodebuddyConfig = null;
   let _onKimiConfig = null;
@@ -6618,6 +6706,7 @@
   }
 
   function showSettingsPanel() {
+    send({ type: 'get_ai_config' });
     send({ type: 'get_model_config' });
     send({ type: 'get_codex_config' });
     send({ type: 'get_codebuddy_config' });
@@ -6654,6 +6743,12 @@
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-ai" role="tabpanel" data-settings-panel="ai" hidden>
+          <div class="settings-section-title">模型</div>
+          <div class="settings-inline-note">填入各提供方的 API 密钥即可使用其模型。内置本机配置无需新增，点击编辑可查看或调整。</div>
+          <div id="ai-unified-config-area"></div>
+          <div class="settings-actions"><button class="btn-save" id="ai-unified-save-btn">保存全部配置</button><span class="settings-status" id="ai-unified-status"></span></div>
+          <div class="settings-divider"></div>
+          <div class="legacy-ai-config" hidden>
           <div class="settings-section-title">Claude API 配置</div>
           <div id="claude-config-area"></div>
           <div class="settings-actions">
@@ -6669,6 +6764,7 @@
             <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
           </div>
           <div class="settings-status" id="codex-status"></div>
+          </div>
 
           <div class="settings-divider"></div>
 
@@ -6718,6 +6814,119 @@
 
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+    const aiUnifiedArea = panel.querySelector('#ai-unified-config-area');
+    const aiUnifiedStatus = panel.querySelector('#ai-unified-status');
+    const aiUnifiedSaveBtn = panel.querySelector('#ai-unified-save-btn');
+    let aiEditingConfig = aiConfigCache ? deepClone(aiConfigCache) : null;
+    let aiEditingProviderIndex = -1;
+    const defaultAiProvider = () => ({
+      id: `provider-${Date.now()}`,
+      name: '新提供方',
+      agent: 'claude',
+      kind: 'remote',
+      baseUrl: '',
+      apiKey: '',
+      models: [],
+    });
+
+    function aiProviderStatus(provider) {
+      if (provider.kind === 'local') return { label: '本机配置', className: 'local' };
+      if (provider.apiKey && provider.baseUrl) return { label: '已配置', className: 'ready' };
+      return { label: '未完成', className: 'muted' };
+    }
+
+    function renderAiProviderList(config) {
+      const providers = config.providers || [];
+      if (providers.length === 0) {
+        return '<div class="ai-provider-empty">还没有提供方，先添加一个自定义提供方。</div>';
+      }
+      return `<div class="ai-provider-list">${providers.map((provider, index) => {
+        const status = aiProviderStatus(provider);
+        const isBuiltin = provider.kind === 'local';
+        return `<div class="ai-provider-row${index === aiEditingProviderIndex ? ' is-editing' : ''}">
+          <div class="ai-provider-row-main">
+            <div class="ai-provider-row-title">${escapeHtml(provider.name || provider.id)} <span class="ai-provider-dot ${status.className}" aria-hidden="true"></span></div>
+            <div class="ai-provider-row-meta"><span class="ai-provider-badge">${isBuiltin ? '内置' : '自定义'}</span><span>${provider.agent === 'claude' ? 'Claude' : 'Codex'}</span><span>${(provider.models || []).length} 个模型</span><span class="ai-provider-status ${status.className}">${status.label}</span></div>
+          </div>
+          <div class="ai-provider-row-actions"><button type="button" class="btn-test" data-ai-edit="${index}">编辑</button>${isBuiltin ? '' : '<button type="button" class="ai-provider-delete" data-ai-delete="' + index + '">删除</button>'}</div>
+        </div>`;
+      }).join('')}</div>`;
+    }
+
+    function renderAiProviderEditor(config) {
+      const index = aiEditingProviderIndex;
+      const provider = config.providers?.[index];
+      if (!provider) return '';
+      const defaultModelId = config.defaults?.[provider.agent]?.providerId === provider.id
+        ? config.defaults[provider.agent].modelId
+        : '';
+      const protocol = provider.agent === 'claude' ? 'anthropic-messages' : 'openai-responses';
+      return `<div class="ai-provider-editor" data-ai-editor="${index}">
+        <div class="ai-provider-editor-header"><strong>${escapeHtml(provider.name || '编辑提供方')}</strong><button type="button" class="settings-close ai-editor-close" aria-label="关闭编辑">×</button></div>
+        <div class="ai-provider-editor-body">
+          <div class="settings-field"><label>显示名称</label><input data-ai-field="name" value="${escapeHtml(provider.name || '')}" placeholder="例如 DeepSeek"></div>
+          <div class="settings-field"><label>接入类型</label><select data-ai-field="agent"><option value="claude"${provider.agent === 'claude' ? ' selected' : ''}>Claude</option><option value="codex"${provider.agent === 'codex' ? ' selected' : ''}>Codex</option></select></div>
+          <div class="settings-field"><label>API 密钥</label><input type="password" data-ai-field="apiKey" value="${escapeHtml(provider.apiKey || '')}" placeholder="已配置的密钥可直接保留"></div>
+          <details class="ai-provider-advanced" open><summary>自定义设置</summary><div class="settings-field"><label>API 地址</label><input data-ai-field="baseUrl" value="${escapeHtml(provider.baseUrl || '')}" placeholder="https://api.example.com/v1"></div><div class="settings-field"><label>API 协议</label><select data-ai-field="protocol"><option value="${protocol}" selected>${provider.agent === 'claude' ? 'Anthropic Messages' : 'OpenAI Responses'}</option></select></div></details>
+          <div class="ai-model-directory"><div class="ai-model-directory-head"><div><strong>模型目录</strong><span>配置可供会话选择的模型</span></div><button type="button" class="btn-test" data-ai-add-model>添加模型</button></div><div class="ai-model-table-head"><span>模型 ID</span><span>显示名称</span><span>默认</span><span></span></div><div data-ai-model-rows>${(provider.models || []).map((model, modelIndex) => `<div class="ai-model-row" data-ai-model-index="${modelIndex}"><input data-ai-model-field="id" value="${escapeHtml(model.id || '')}" placeholder="例如 gpt-5.4"><input data-ai-model-field="label" value="${escapeHtml(model.label || model.id || '')}" placeholder="显示名称"><label class="ai-default-model"><input type="radio" name="ai-default-model" data-ai-default-model="${escapeHtml(model.id || '')}"${model.id === defaultModelId ? ' checked' : ''}><span>默认</span></label><button type="button" class="ai-model-remove" data-ai-remove-model="${modelIndex}" aria-label="删除模型">×</button></div>`).join('')}</div></div>
+        </div>
+        <div class="ai-provider-editor-actions"><button type="button" class="btn-test ai-editor-cancel">取消</button><button type="button" class="btn-save ai-editor-save">保存提供方</button></div>
+      </div>`;
+    }
+
+    function renderAiUnifiedConfig() {
+      if (!aiEditingConfig) aiEditingConfig = { version: 1, virtualApiKey: '', providers: [], defaults: {} };
+      const config = aiEditingConfig || { providers: [], defaults: {} };
+      aiUnifiedArea.innerHTML = `<div class="ai-provider-list-wrap">${renderAiProviderList(config)}<div class="ai-provider-add-actions"><button type="button" class="ai-provider-add" data-ai-add="remote">＋ 添加自定义提供方</button></div></div>${renderAiProviderEditor(config)}`;
+      aiUnifiedArea.querySelectorAll('[data-ai-edit]').forEach((button) => button.addEventListener('click', () => { aiEditingProviderIndex = Number(button.dataset.aiEdit); renderAiUnifiedConfig(); }));
+      aiUnifiedArea.querySelectorAll('[data-ai-delete]').forEach((button) => button.addEventListener('click', () => { const index = Number(button.dataset.aiDelete); if (!confirm(`确认删除「${aiEditingConfig.providers[index]?.name || ''}」？`)) return; aiEditingConfig.providers.splice(index, 1); aiEditingProviderIndex = -1; renderAiUnifiedConfig(); }));
+      aiUnifiedArea.querySelectorAll('[data-ai-add]').forEach((button) => button.addEventListener('click', () => { aiEditingConfig.providers.push(defaultAiProvider()); aiEditingProviderIndex = aiEditingConfig.providers.length - 1; renderAiUnifiedConfig(); }));
+      const editor = aiUnifiedArea.querySelector('[data-ai-editor]');
+      if (!editor) return;
+      const syncEditorProvider = () => {
+        const provider = aiEditingConfig.providers[aiEditingProviderIndex];
+        if (!provider) return;
+        provider.name = editor.querySelector('[data-ai-field="name"]').value.trim();
+        provider.agent = editor.querySelector('[data-ai-field="agent"]').value;
+        provider.apiKey = editor.querySelector('[data-ai-field="apiKey"]').value.trim();
+        provider.baseUrl = editor.querySelector('[data-ai-field="baseUrl"]').value.trim();
+        provider.models = Array.from(editor.querySelectorAll('[data-ai-model-index]')).map((row) => ({ id: row.querySelector('[data-ai-model-field="id"]').value.trim(), label: row.querySelector('[data-ai-model-field="label"]').value.trim() })).filter((model) => model.id);
+        const checked = editor.querySelector('[data-ai-default-model]:checked');
+        const defaultModelId = checked?.closest('[data-ai-model-index]')?.querySelector('[data-ai-model-field="id"]')?.value.trim() || provider.models[0]?.id || '';
+        if (provider.id && defaultModelId) aiEditingConfig.defaults[provider.agent] = { providerId: provider.id, modelId: defaultModelId, ...(provider.agent === 'codex' ? { reasoningEffort: aiEditingConfig.defaults.codex?.reasoningEffort || 'medium' } : {}) };
+      };
+      editor.querySelector('[data-ai-field="agent"]').addEventListener('change', () => { syncEditorProvider(); renderAiUnifiedConfig(); });
+      editor.querySelector('[data-ai-add-model]').addEventListener('click', () => { syncEditorProvider(); aiEditingConfig.providers[aiEditingProviderIndex].models.push({ id: '', label: '' }); renderAiUnifiedConfig(); });
+      editor.querySelectorAll('[data-ai-remove-model]').forEach((button) => button.addEventListener('click', () => { syncEditorProvider(); aiEditingConfig.providers[aiEditingProviderIndex].models.splice(Number(button.dataset.aiRemoveModel), 1); renderAiUnifiedConfig(); }));
+      editor.querySelector('.ai-editor-close').addEventListener('click', () => { aiEditingProviderIndex = -1; renderAiUnifiedConfig(); });
+      editor.querySelector('.ai-editor-cancel').addEventListener('click', () => { aiEditingProviderIndex = -1; renderAiUnifiedConfig(); });
+      editor.querySelector('.ai-editor-save').addEventListener('click', () => { syncEditorProvider(); persistAiConfig(); aiEditingProviderIndex = -1; renderAiUnifiedConfig(); });
+    }
+    function readAiUnifiedConfig() {
+      if (aiEditingProviderIndex >= 0) {
+        const editor = aiUnifiedArea.querySelector('[data-ai-editor]');
+        if (editor) {
+          const provider = aiEditingConfig.providers[aiEditingProviderIndex];
+          provider.name = editor.querySelector('[data-ai-field="name"]').value.trim();
+          provider.agent = editor.querySelector('[data-ai-field="agent"]').value;
+          provider.apiKey = editor.querySelector('[data-ai-field="apiKey"]').value.trim();
+          provider.baseUrl = editor.querySelector('[data-ai-field="baseUrl"]').value.trim();
+          provider.models = Array.from(editor.querySelectorAll('[data-ai-model-index]')).map((row) => ({ id: row.querySelector('[data-ai-model-field="id"]').value.trim(), label: row.querySelector('[data-ai-model-field="label"]').value.trim() })).filter((model) => model.id);
+          const checked = editor.querySelector('[data-ai-default-model]:checked');
+          const defaultModelId = checked?.closest('[data-ai-model-index]')?.querySelector('[data-ai-model-field="id"]')?.value.trim();
+          if (defaultModelId) aiEditingConfig.defaults[provider.agent] = { providerId: provider.id, modelId: defaultModelId, ...(provider.agent === 'codex' ? { reasoningEffort: aiEditingConfig.defaults.codex?.reasoningEffort || 'medium' } : {}) };
+        }
+      }
+      return { version: 1, virtualApiKey: aiEditingConfig?.virtualApiKey || '', providers: aiEditingConfig?.providers || [], defaults: aiEditingConfig?.defaults || {} };
+    }
+    function persistAiConfig() {
+      send({ type: 'save_ai_config', config: readAiUnifiedConfig() });
+      aiUnifiedStatus.textContent = '已保存';
+      aiUnifiedStatus.className = 'settings-status success';
+    }
+    _onAiConfig = (config) => { aiEditingConfig = deepClone(config || { providers: [], defaults: {} }); renderAiUnifiedConfig(); };
+    aiUnifiedSaveBtn.addEventListener('click', persistAiConfig);
+    renderAiUnifiedConfig();
     const settingsTabs = panel.querySelectorAll('[data-settings-tab]');
     const settingsTabPanels = panel.querySelectorAll('[data-settings-panel]');
     const activateSettingsTab = (tabName) => {
@@ -8182,6 +8391,7 @@
     _onNotifyConfig = null;
     _onNotifyTestResult = null;
     _onModelConfig = null;
+    _onAiConfig = null;
     _onCodexConfig = null;
     _onKimiConfig = null;
     _onFetchModelsResult = null;

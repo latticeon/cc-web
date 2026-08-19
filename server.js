@@ -16,6 +16,8 @@ const {
 } = require('./lib/agent-registry');
 const { createCodexRolloutStore } = require('./lib/codex-rollouts');
 const { readGitFileDiff, readGitHistory } = require('./lib/git-workspace');
+const { createAiConfigStore } = require('./lib/ai-config');
+const { createAiRouter } = require('./lib/ai-router');
 
 // Load .env
 const envPath = path.join(__dirname, '.env');
@@ -228,6 +230,12 @@ const PROJECTS_PATH = path.join(CONFIG_DIR, 'projects.json');
 fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 fs.mkdirSync(LOGS_DIR, { recursive: true });
 fs.mkdirSync(CONFIG_DIR, { recursive: true });
+
+const aiConfigStore = createAiConfigStore({
+  configDir: CONFIG_DIR,
+  virtualApiKey: process.env.CC_WEB_AI_VIRTUAL_KEY || 'cc-web-router-key',
+});
+const aiRouter = createAiRouter({ store: aiConfigStore });
 fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 
 // === Process Lifecycle Logger ===
@@ -797,6 +805,12 @@ function usesAgentsMarkdown(agent) {
 }
 
 function resolveAgentDefaultSessionModel(agent) {
+  const normalizedAgent = normalizeAgent(agent);
+  if (normalizedAgent === 'claude' || normalizedAgent === 'codex') {
+    const config = aiConfigStore.load();
+    const selection = aiConfigStore.resolveSelection(config, normalizedAgent);
+    return aiConfigStore.selectionValue(selection) || null;
+  }
   const rememberedModel = getRememberedAgentModel(agent);
   if (rememberedModel) return rememberedModel;
   const spec = getAgentConfig(agent).defaults?.defaultSessionModel || null;
@@ -814,6 +828,27 @@ function resolveAgentDefaultSessionModel(agent) {
     return spec.value || null;
   }
   return null;
+}
+
+function resolveAiSessionSelection(session) {
+  const agent = normalizeAgent(session?.agent);
+  if (agent !== 'claude' && agent !== 'codex') return null;
+  const config = aiConfigStore.load();
+  const parsed = aiConfigStore.parseSelection(session?.model);
+  const selection = aiConfigStore.resolveSelection(
+    config,
+    agent,
+    String(session?.aiProviderId || parsed?.providerId || '').trim(),
+    String(session?.aiModelId || parsed?.modelId || '').trim(),
+  );
+  if (!selection) return null;
+  session.aiProviderId = selection.provider.id;
+  session.aiModelId = selection.model.id;
+  session.model = aiConfigStore.selectionValue(selection);
+  if (agent === 'codex') {
+    session.reasoningEffort = aiConfigStore.normalizeReasoningEffort(session.reasoningEffort);
+  }
+  return selection;
 }
 
 function resolveAgentDefaultCwd(agent) {
@@ -1317,6 +1352,7 @@ function handleSaveDevConfig(ws, msg) {
 }
 
 const CODEX_RUNTIME_HOME = path.join(CONFIG_DIR, 'codex-runtime-home');
+const CODEX_AI_RUNTIME_HOME = path.join(CONFIG_DIR, 'ai-codex-runtime-home');
 const KIMI_RUNTIME_DIR = path.join(CONFIG_DIR, 'kimi-runtime');
 
 function tomlString(value) {
@@ -1690,6 +1726,9 @@ const HISTORY_CHUNK_SIZE = 24;
 function normalizeSession(session) {
   if (!session || typeof session !== 'object') return session;
   session.agent = normalizeAgent(session.agent);
+  if (session.agent === 'claude' || session.agent === 'codex') {
+    resolveAiSessionSelection(session);
+  }
   getAgentIds().forEach((agentId) => {
     const runtimeField = getRuntimeSessionField(agentId);
     if (!Object.prototype.hasOwnProperty.call(session, runtimeField)) session[runtimeField] = null;
@@ -1761,7 +1800,7 @@ function loadSession(id) {
   try {
     const session = normalizeSession(JSON.parse(fs.readFileSync(sessionPath(id), 'utf8')));
     const rememberedModel = getRememberedAgentModel(getSessionAgent(session));
-    if (rememberedModel) session.model = rememberedModel;
+    if (rememberedModel && getSessionAgent(session) !== 'claude' && getSessionAgent(session) !== 'codex') session.model = rememberedModel;
     return session;
   } catch {
     return null;
@@ -1772,6 +1811,35 @@ function saveSession(session) {
   normalizeSession(session);
   ensureSessionProject(session);
   fs.writeFileSync(sessionPath(session.id), JSON.stringify(session, null, 2));
+}
+
+function prepareCodexAiRuntime(session) {
+  const selection = resolveAiSessionSelection(session);
+  if (!selection) return { error: 'Codex 当前没有可用的提供方或模型，请先在 AI 配置中添加。' };
+  if (selection.provider.kind === 'local') return { mode: 'local', selection };
+  if (!selection.provider.baseUrl || !selection.provider.apiKey) {
+    return { error: `提供方「${selection.provider.name}」缺少 Base URL 或 API Key。` };
+  }
+  fs.mkdirSync(CODEX_AI_RUNTIME_HOME, { recursive: true });
+  const configToml = [
+    'preferred_auth_method = "apikey"',
+    'model_provider = "cc_web"',
+    '',
+    '[model_providers.cc_web]',
+    'name = "cc-web"',
+    `base_url = ${tomlString(`http://127.0.0.1:${PORT}/router/openai`)}`,
+    'wire_api = "responses"',
+    'requires_openai_auth = true',
+    'env_key = "OPENAI_API_KEY"',
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(CODEX_AI_RUNTIME_HOME, 'config.toml'), configToml, 'utf8');
+  return {
+    mode: 'remote',
+    homeDir: CODEX_AI_RUNTIME_HOME,
+    apiKey: aiConfigStore.load().virtualApiKey,
+    selection,
+  };
 }
 
 function getProjectPathLeaf(value) {
@@ -2491,6 +2559,10 @@ function sendSessionList(ws) {
           updated: s.updated,
           hasUnread: !!s.hasUnread,
           agent: getSessionAgent(s),
+          model: sessionModelLabel(s),
+          aiProviderId: s.aiProviderId || '',
+          aiModelId: s.aiModelId || '',
+          reasoningEffort: s.reasoningEffort || '',
           isRunning: activeProcesses.has(s.id),
         });
       } catch {}
@@ -3421,8 +3493,14 @@ function recoverProcesses() {
 }
 
 // === HTTP Static File Server ===
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === '/router/anthropic' || url.pathname.startsWith('/router/anthropic/')
+    || url.pathname === '/router/openai' || url.pathname.startsWith('/router/openai/')) {
+    await aiRouter.handle(req, res);
+    return;
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/agents.js') {
     const payload = `window.CC_AGENT_CATALOG = ${JSON.stringify(getPublicAgentCatalog(), null, 2)};\n`;
@@ -3699,6 +3777,15 @@ wss.on('connection', (ws, req) => {
         break;
       case 'save_model_config':
         handleSaveModelConfig(ws, msg.config);
+        break;
+      case 'get_ai_config':
+        wsSend(ws, { type: 'ai_config', config: aiConfigStore.getPublic(aiConfigStore.load()) });
+        break;
+      case 'save_ai_config':
+        handleSaveAiConfig(ws, msg.config);
+        break;
+      case 'set_ai_selection':
+        handleSetAiSelection(ws, msg);
         break;
       case 'get_codex_config':
         wsSend(ws, { type: 'codex_config', config: getCodexConfigMasked() });
@@ -4361,6 +4448,9 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
           title: session.title,
           mode: session.permissionMode || 'yolo',
           model: sessionModelLabel(session),
+          aiProviderId: session.aiProviderId || '',
+          aiModelId: session.aiModelId || '',
+          reasoningEffort: session.reasoningEffort || '',
           agent: getSessionAgent(session),
           cwd: session.cwd || null,
           projectId: session.projectId || null,
@@ -4377,6 +4467,36 @@ function handleSlashCommand(ws, text, sessionId, fallbackAgent) {
 
     case '/model': {
       const modelInput = parts[1];
+      if (agent === 'claude' || agent === 'codex') {
+        const config = aiConfigStore.load();
+        if (!modelInput) {
+          wsSend(ws, { type: 'system_message', message: `当前模型: ${session?.model || '未选择'}` });
+          break;
+        }
+        const parsed = aiConfigStore.parseSelection(modelInput);
+        const selection = parsed && aiConfigStore.resolveSelection(config, agent, parsed.providerId, parsed.modelId);
+        if (!selection) {
+          wsSend(ws, { type: 'system_message', message: '无效模型，请使用已配置的 提供方/模型' });
+          break;
+        }
+        if (session) {
+          session.aiProviderId = selection.provider.id;
+          session.aiModelId = selection.model.id;
+          session.model = aiConfigStore.selectionValue(selection);
+          session.updated = new Date().toISOString();
+          saveSession(session);
+        }
+        wsSend(ws, {
+          type: 'model_changed',
+          sessionId: session?.id,
+          model: aiConfigStore.selectionValue(selection),
+          aiProviderId: selection.provider.id,
+          aiModelId: selection.model.id,
+          reasoningEffort: session?.reasoningEffort || '',
+        });
+        wsSend(ws, { type: 'system_message', message: `模型已切换为: ${aiConfigStore.selectionValue(selection)}` });
+        break;
+      }
       if (agent === 'codex' || agent === 'codebuddy' || agent === 'kimi' || agent === 'opencode') {
         const agentLabel = agent === 'codex'
           ? 'Codex'
@@ -4649,6 +4769,65 @@ function handleNewProject(ws, msg) {
   sendSessionList(ws);
 }
 
+function handleSaveAiConfig(ws, newConfig) {
+  if (!newConfig || typeof newConfig !== 'object') {
+    return wsSend(ws, { type: 'error', message: '无效的统一 AI 配置' });
+  }
+  const current = aiConfigStore.load();
+  const oldById = new Map((current.providers || []).map((provider) => [`${provider.agent}:${provider.id}`, provider]));
+  const providers = Array.isArray(newConfig.providers) ? newConfig.providers.map((raw) => {
+    const old = oldById.get(`${raw?.agent === 'codex' ? 'codex' : 'claude'}:${String(raw?.id || '').trim()}`);
+    const apiKey = String(raw?.apiKey || '');
+    return {
+      ...raw,
+      apiKey: apiKey.includes('****') ? (old?.apiKey || '') : apiKey,
+    };
+  }) : [];
+  const virtualApiKey = String(newConfig.virtualApiKey || '');
+  const candidate = aiConfigStore.sanitize({
+    ...newConfig,
+    virtualApiKey: virtualApiKey.includes('****') ? current.virtualApiKey : virtualApiKey,
+    providers,
+  });
+  for (const agent of ['claude', 'codex']) {
+    if (!candidate.providers.some((provider) => provider.agent === agent && provider.models.length > 0)) {
+      return wsSend(ws, { type: 'error', message: `${agent === 'claude' ? 'Claude' : 'Codex'} 至少需要一个包含模型的提供方` });
+    }
+  }
+  const saved = aiConfigStore.save(candidate);
+  wsSend(ws, { type: 'ai_config', config: aiConfigStore.getPublic(saved) });
+  wsSend(ws, { type: 'system_message', message: '统一 AI 配置已保存' });
+}
+
+function handleSetAiSelection(ws, msg) {
+  const sessionId = String(msg?.sessionId || '').trim();
+  const session = sessionId ? loadSession(sessionId) : null;
+  if (!session) return wsSend(ws, { type: 'error', message: '会话不存在，无法切换模型' });
+  if (activeProcesses.has(sessionId)) return wsSend(ws, { type: 'error', message: '当前会话正在处理中，请等待本轮完成后再切换提供方或模型' });
+  const agent = getSessionAgent(session);
+  if (agent !== 'claude' && agent !== 'codex') return wsSend(ws, { type: 'error', message: '当前 Agent 不支持统一提供方切换' });
+  const config = aiConfigStore.load();
+  const selection = aiConfigStore.resolveSelection(config, agent, msg.providerId, msg.modelId);
+  if (!selection) return wsSend(ws, { type: 'error', message: '提供方或模型不存在，无法切换' });
+  session.aiProviderId = selection.provider.id;
+  session.aiModelId = selection.model.id;
+  session.model = aiConfigStore.selectionValue(selection);
+  if (agent === 'codex') session.reasoningEffort = aiConfigStore.normalizeReasoningEffort(msg.reasoningEffort || session.reasoningEffort);
+  session.updated = new Date().toISOString();
+  saveSession(session);
+  wsSessionMap.set(ws, sessionId);
+  wsSend(ws, {
+    type: 'model_changed',
+    sessionId,
+    model: session.model,
+    aiProviderId: session.aiProviderId,
+    aiModelId: session.aiModelId,
+    reasoningEffort: session.reasoningEffort || '',
+  });
+  wsSend(ws, { type: 'system_message', sessionId, message: `已切换为 ${session.model}${agent === 'codex' ? `（Thinking: ${session.reasoningEffort}）` : ''}` });
+  sendSessionList(ws);
+}
+
 function handleNewSession(ws, msg) {
   const cwd = (msg && msg.cwd) ? String(msg.cwd) : null;
   const agent = normalizeAgent(msg?.agent);
@@ -4693,6 +4872,9 @@ function handleNewSession(ws, msg) {
     agent,
     [runtimeField]: null,
     model: resolveAgentDefaultSessionModel(agent),
+    aiProviderId: '',
+    aiModelId: '',
+    reasoningEffort: agent === 'codex' ? 'medium' : '',
     permissionMode: requestedMode,
     totalCost: 0,
     totalUsage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
@@ -4713,6 +4895,7 @@ function handleNewSession(ws, msg) {
       session.codebuddyProfile = codebuddyConfig.mode === 'custom' ? String(codebuddyConfig.activeProfile || '').trim() : '';
     }
   }
+  normalizeSession(session);
   saveSession(session);
   wsSessionMap.set(ws, id);
   wsSend(ws, {
@@ -4722,6 +4905,9 @@ function handleNewSession(ws, msg) {
     title: session.title,
     mode: session.permissionMode,
     model: sessionModelLabel(session),
+    aiProviderId: session.aiProviderId || '',
+    aiModelId: session.aiModelId || '',
+    reasoningEffort: session.reasoningEffort || '',
     agent,
     cwd: session.cwd,
     projectId: session.projectId || null,
@@ -4819,6 +5005,9 @@ function handleLoadSession(ws, sessionId) {
     mode: session.permissionMode || 'yolo',
     model: sessionModelLabel(session),
     agent: getSessionAgent(session),
+    aiProviderId: session.aiProviderId || '',
+    aiModelId: session.aiModelId || '',
+    reasoningEffort: session.reasoningEffort || '',
     hasUnread: hadUnread,
     cwd: effectiveCwd,
     projectId: session.projectId || null,
@@ -5226,6 +5415,9 @@ function handleMessage(ws, msg, options = {}) {
       title: session.title,
       mode: session.permissionMode || 'yolo',
       model: sessionModelLabel(session),
+      aiProviderId: session.aiProviderId || '',
+      aiModelId: session.aiModelId || '',
+      reasoningEffort: session.reasoningEffort || '',
       agent: getSessionAgent(session),
       cwd: session.cwd || null,
       projectId: session.projectId || null,
@@ -5547,7 +5739,7 @@ const {
   buildSpawnSpec,
   processRuntimeEvent,
 } = createAgentRuntime({
-  processEnv: process.env,
+  processEnv: { ...process.env, CC_WEB_PORT: String(PORT) },
   CLAUDE_PATH,
   CODEX_PATH,
   CODEBUDDY_PATH,
@@ -5568,6 +5760,9 @@ const {
   saveSession,
   setRuntimeSessionId,
   getRuntimeSessionId,
+  resolveAiSessionSelection,
+  prepareCodexAiRuntime,
+  getAiVirtualApiKey: () => aiConfigStore.load().virtualApiKey,
   resolveCodexContextTokens: (session) => getLatestCodexContextTokens(getRuntimeSessionId(session)),
   getGitWorkingTreeStats,
 });
