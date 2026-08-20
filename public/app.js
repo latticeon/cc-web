@@ -2032,7 +2032,7 @@
       appendError('这个分组没有项目地址，不能直接新建项目会话。');
       return;
     }
-    const agentOrder = ['codex', 'opencode', 'codebuddy', 'kimi', 'claude'];
+    const agentOrder = ['codex', 'claude', 'opencode', 'codebuddy', 'kimi'];
     const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
       const aIndex = agentOrder.indexOf(a.id);
       const bIndex = agentOrder.indexOf(b.id);
@@ -8732,7 +8732,7 @@
 
   function showNewSessionModal(options = {}) {
     const projectOnly = options.projectOnly === true;
-    const agentOrder = ['codex', 'opencode', 'codebuddy', 'kimi', 'claude'];
+    const agentOrder = ['codex', 'claude', 'opencode', 'codebuddy', 'kimi'];
     const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
       const aIndex = agentOrder.indexOf(a.id);
       const bIndex = agentOrder.indexOf(b.id);
