@@ -324,7 +324,6 @@
   let currentTheme = (document.documentElement.dataset.theme || localStorage.getItem('cc-web-theme') || 'washi');
   let currentFont = (document.documentElement.dataset.font || localStorage.getItem('cc-web-font') || 'system');
   let codexConfigCache = null;
-  let claudeConfigCache = null;
   let codebuddyConfigCache = null;
   let loadedHistorySessionId = null;
   let historyLoadState = { sessionId: null, loading: false, hasMore: false };
@@ -3555,7 +3554,6 @@
         break;
 
       case 'model_config':
-        claudeConfigCache = msg.config || null;
         if (typeof _onModelConfig === 'function') _onModelConfig(msg.config);
         updateContextUsageDisplay();
         break;
@@ -5904,113 +5902,10 @@
 	      showCodexCombinedPicker();
 	      return;
 	    }
-	    // Claude preset: show picker with provider tab
-	    if (currentAgent === 'claude') {
-	      showClaudeModelPickerWithProviders(modelControl);
-	      return;
-	    }
 	    showOptionPicker(modelControl.title || '选择模型', modelControl.options || [], currentModel, (value) => {
 	      send({ type: 'message', text: `/model ${value}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
     });
   }
-
-    function getClaudeProviders() {
-      return (claudeConfigCache?.templates || []).filter(t => t.apiKey && t.apiBase);
-    }
-    function getCodexProviders() {
-      return (codexConfigCache?.profiles || []).filter(p => p.apiKey && p.apiBase);
-    }
-
-    function showClaudeModelPickerWithProviders(modelControl) {
-      hideOptionPicker();
-      const overlay = document.createElement('div');
-      overlay.className = 'option-picker-overlay';
-      overlay.id = 'option-picker-overlay';
-      const picker = document.createElement('div');
-      picker.className = 'option-picker';
-      picker.id = 'option-picker';
-
-      const renderModelTab = () => {
-        const options = modelControl.options || [];
-        return options.map((opt) => `
-          <div class="option-picker-item${opt.value === currentModel ? ' active' : ''}" data-value="${escapeHtml(opt.value)}">
-            <div class="option-picker-item-info">
-              <div class="option-picker-item-label">${escapeHtml(opt.label)}</div>
-              <div class="option-picker-item-desc">${escapeHtml(opt.desc || '')}</div>
-            </div>
-            ${opt.value === currentModel ? '<span class="option-picker-item-check">✓</span>' : ''}
-          </div>`).join('');
-      };
-
-      const providers = getClaudeProviders();
-      const renderProviderTab = () => {
-        const localItem = `
-          <div class="option-picker-item" data-provider="__local__">
-            <div class="option-picker-item-info">
-              <div class="option-picker-item-label">本地登录态</div>
-              <div class="option-picker-item-desc">使用本机 ~/.claude/ 配置</div>
-            </div>
-          </div>`;
-        if (providers.length === 0) {
-          return localItem;
-        }
-        return localItem + providers.map((p) => `
-          <div class="option-picker-item" data-provider="${escapeHtml(p.name)}">
-            <div class="option-picker-item-info">
-              <div class="option-picker-item-label">${escapeHtml(p.name)}</div>
-              <div class="option-picker-item-desc">${escapeHtml(p.apiBase || '')}</div>
-            </div>
-          </div>`).join('');
-      };
-
-      picker.innerHTML = `
-        <div class="option-picker-title">选择模型</div>
-        <div class="picker-tabs" role="tablist">
-          <button class="picker-tab active" type="button" data-picker-tab="model" role="tab">模型</button>
-          <button class="picker-tab" type="button" data-picker-tab="provider" role="tab">供应商</button>
-        </div>
-        <div class="picker-panel active" data-picker-panel="model">
-          ${renderModelTab()}
-        </div>
-        <div class="picker-panel" data-picker-panel="provider" hidden>
-          ${renderProviderTab()}
-        </div>
-      `;
-      overlay.appendChild(picker);
-      document.body.appendChild(overlay);
-
-      const modelPanel = picker.querySelector('[data-picker-panel="model"]');
-      const providerPanel = picker.querySelector('[data-picker-panel="provider"]');
-      const tabs = picker.querySelectorAll('[data-picker-tab]');
-      const panels = picker.querySelectorAll('[data-picker-panel]');
-      tabs.forEach((tab) => {
-        tab.addEventListener('click', () => {
-          const name = tab.dataset.pickerTab;
-          tabs.forEach((t) => t.classList.toggle('active', t === tab));
-          panels.forEach((p) => {
-            const active = p.dataset.pickerPanel === name;
-            p.classList.toggle('active', active);
-            p.hidden = !active;
-          });
-        });
-      });
-      modelPanel.querySelectorAll('.option-picker-item').forEach((el) => {
-        el.addEventListener('click', () => {
-          const v = el.dataset.value;
-          hideOptionPicker();
-          send({ type: 'message', text: `/model ${v}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
-        });
-      });
-      providerPanel.querySelectorAll('[data-provider]').forEach((el) => {
-        el.addEventListener('click', () => {
-          const providerName = el.dataset.provider;
-          hideOptionPicker();
-          send({ type: 'switch_provider', agent: 'claude', provider: providerName, sessionId: currentSessionId });
-        });
-      });
-      overlay.addEventListener('click', _pickerOutsideClick);
-      document.addEventListener('keydown', _pickerEscape);
-    }
 
 	  function showModePicker() {
     showOptionPicker('选择权限模式', MODE_PICKER_OPTIONS, currentMode, (value) => {
@@ -6142,27 +6037,6 @@
     let selectedBase = current.base;
     let selectedLevel = current.level;
 
-    const codexProviders = getCodexProviders();
-    const renderProviderPanel = () => {
-      const localItem = `
-        <div class="option-picker-item" data-provider="__local__">
-          <div class="option-picker-item-info">
-            <div class="option-picker-item-label">本地登录态</div>
-            <div class="option-picker-item-desc">使用本机 ~/.codex/ 配置</div>
-          </div>
-        </div>`;
-      if (codexProviders.length === 0) {
-        return localItem;
-      }
-      return localItem + codexProviders.map((p) => `
-        <div class="option-picker-item" data-provider="${escapeHtml(p.name)}">
-          <div class="option-picker-item-info">
-            <div class="option-picker-item-label">${escapeHtml(p.name)}</div>
-            <div class="option-picker-item-desc">${escapeHtml(p.apiBase || '')}</div>
-          </div>
-        </div>`).join('');
-    };
-
     const overlay = document.createElement('div');
     overlay.className = 'option-picker-overlay';
     overlay.id = 'option-picker-overlay';
@@ -6177,60 +6051,35 @@
         </div>
         <button class="option-picker-close" type="button" aria-label="关闭">×</button>
       </header>
-      <div class="picker-tabs" role="tablist">
-        <button class="picker-tab active" type="button" data-picker-tab="model" role="tab">模型</button>
-        <button class="picker-tab" type="button" data-picker-tab="provider" role="tab">供应商</button>
+      <div class="option-picker-config-body">
+        <section class="option-picker-config-section">
+          <div class="option-picker-section-title">模型</div>
+          <div class="option-picker-model-grid">
+            ${baseOptions.map((option) => `
+              <button class="option-picker-choice${option.value === selectedBase ? ' active' : ''}" type="button" data-model-value="${escapeHtml(option.value)}">
+                <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
+                <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
+                <span class="option-picker-choice-mark">✓</span>
+              </button>`).join('')}
+          </div>
+        </section>
+        <section class="option-picker-config-section">
+          <div class="option-picker-section-title">思考强度</div>
+          <div class="option-picker-effort-grid">
+            ${thinkingOptions.map((option) => `
+              <button class="option-picker-effort${option.value === selectedLevel ? ' active' : ''}" type="button" data-thinking-value="${escapeHtml(option.value)}">
+                <span>${escapeHtml(option.label)}</span>
+                <small>${escapeHtml(option.desc || '')}</small>
+              </button>`).join('')}
+          </div>
+        </section>
       </div>
-      <div class="picker-panel active" data-picker-panel="model">
-        <div class="option-picker-config-body">
-          <section class="option-picker-config-section">
-            <div class="option-picker-section-title">模型</div>
-            <div class="option-picker-model-grid">
-              ${baseOptions.map((option) => `
-                <button class="option-picker-choice${option.value === selectedBase ? ' active' : ''}" type="button" data-model-value="${escapeHtml(option.value)}">
-                  <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
-                  <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
-                  <span class="option-picker-choice-mark">✓</span>
-                </button>`).join('')}
-            </div>
-          </section>
-          <section class="option-picker-config-section">
-            <div class="option-picker-section-title">思考强度</div>
-            <div class="option-picker-effort-grid">
-              ${thinkingOptions.map((option) => `
-                <button class="option-picker-effort${option.value === selectedLevel ? ' active' : ''}" type="button" data-thinking-value="${escapeHtml(option.value)}">
-                  <span>${escapeHtml(option.label)}</span>
-                  <small>${escapeHtml(option.desc || '')}</small>
-                </button>`).join('')}
-            </div>
-          </section>
-        </div>
-        <footer class="option-picker-footer">
-          <button class="option-picker-cancel" type="button">取消</button>
-          <button class="option-picker-confirm" type="button">应用</button>
-        </footer>
-      </div>
-      <div class="picker-panel" data-picker-panel="provider" hidden>
-        <div class="option-picker-list">
-          ${renderProviderPanel()}
-        </div>
-      </div>`;
+      <footer class="option-picker-footer">
+        <button class="option-picker-cancel" type="button">取消</button>
+        <button class="option-picker-confirm" type="button">应用</button>
+      </footer>`;
     overlay.appendChild(picker);
     document.body.appendChild(overlay);
-
-    const tabs = picker.querySelectorAll('[data-picker-tab]');
-    const panels = picker.querySelectorAll('[data-picker-panel]');
-    tabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const name = tab.dataset.pickerTab;
-        tabs.forEach((t) => t.classList.toggle('active', t === tab));
-        panels.forEach((p) => {
-          const active = p.dataset.pickerPanel === name;
-          p.classList.toggle('active', active);
-          p.hidden = !active;
-        });
-      });
-    });
 
     picker.querySelectorAll('[data-model-value]').forEach((button) => {
       button.addEventListener('click', () => {
@@ -6250,13 +6099,6 @@
       const full = selectedLevel ? `${selectedBase}(${selectedLevel})` : selectedBase;
       hideOptionPicker();
       send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
-    });
-    picker.querySelectorAll('[data-provider]').forEach((el) => {
-      el.addEventListener('click', () => {
-        const providerName = el.dataset.provider;
-        hideOptionPicker();
-        send({ type: 'switch_provider', agent: 'codex', provider: providerName, sessionId: currentSessionId });
-      });
     });
     overlay.addEventListener('click', _pickerOutsideClick);
     document.addEventListener('keydown', _pickerEscape);
@@ -6813,38 +6655,35 @@
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-ai" role="tabpanel" data-settings-panel="ai" hidden>
-          <div class="ai-subtabs" role="tablist" aria-label="AI 配置分类">
-            <button class="ai-subtab active" type="button" role="tab" aria-selected="true" data-ai-tab="claude">Claude</button>
-            <button class="ai-subtab" type="button" role="tab" aria-selected="false" data-ai-tab="codex">Codex</button>
-            <button class="ai-subtab" type="button" role="tab" aria-selected="false" data-ai-tab="codebuddy">CodeBuddy</button>
-            <button class="ai-subtab" type="button" role="tab" aria-selected="false" data-ai-tab="kimi">Kimi</button>
+          <div class="settings-section-title">Claude API 配置</div>
+          <div id="claude-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="model-save-btn">保存 Claude 配置</button>
           </div>
+          <div class="settings-status" id="model-status"></div>
 
-          <div class="ai-subpanel active" data-ai-panel="claude">
-            <div class="settings-section-title">Claude 供应商管理</div>
-            <div id="claude-config-area"></div>
-            <div class="settings-status" id="model-status"></div>
-          </div>
+          <div class="settings-divider"></div>
 
-          <div class="ai-subpanel" data-ai-panel="codex" hidden>
-            <div class="settings-section-title">Codex 供应商管理</div>
-            <div id="codex-config-area"></div>
-            <div class="settings-status" id="codex-status"></div>
+          <div class="settings-section-title">Codex API 配置</div>
+          <div id="codex-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
           </div>
+          <div class="settings-status" id="codex-status"></div>
 
-          <div class="ai-subpanel" data-ai-panel="codebuddy" hidden>
-            <div class="settings-section-title">CodeBuddy CLI 配置</div>
-            <div id="codebuddy-config-area"></div>
-          </div>
+          <div class="settings-divider"></div>
 
-          <div class="ai-subpanel" data-ai-panel="kimi" hidden>
-            <div class="settings-section-title">Kimi CLI 配置</div>
-            <div id="kimi-config-area"></div>
-            <div class="settings-actions">
-              <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
-            </div>
-            <div class="settings-status" id="kimi-status"></div>
+          <div class="settings-section-title">CodeBuddy CLI 配置</div>
+          <div id="codebuddy-config-area"></div>
+
+          <div class="settings-divider"></div>
+
+          <div class="settings-section-title">Kimi CLI 配置</div>
+          <div id="kimi-config-area"></div>
+          <div class="settings-actions">
+            <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
           </div>
+          <div class="settings-status" id="kimi-status"></div>
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-appearance" role="tabpanel" data-settings-panel="appearance" hidden>
@@ -6909,36 +6748,6 @@
       });
     });
     activateSettingsTab('cli');
-
-    // === AI Sub-tabs ===
-    const aiSubtabs = panel.querySelectorAll('[data-ai-tab]');
-    const aiSubpanels = panel.querySelectorAll('[data-ai-panel]');
-    const activateAiSubtab = (tabName) => {
-      aiSubtabs.forEach((tab) => {
-        const active = tab.dataset.aiTab === tabName;
-        tab.classList.toggle('active', active);
-        tab.setAttribute('aria-selected', String(active));
-      });
-      aiSubpanels.forEach((p) => {
-        const active = p.dataset.aiPanel === tabName;
-        p.classList.toggle('active', active);
-        p.hidden = !active;
-      });
-    };
-    aiSubtabs.forEach((tab) => {
-      tab.addEventListener('click', () => activateAiSubtab(tab.dataset.aiTab));
-      tab.addEventListener('keydown', (event) => {
-        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-        event.preventDefault();
-        const tabs = Array.from(aiSubtabs);
-        const currentIndex = tabs.indexOf(tab);
-        const offset = event.key === 'ArrowRight' ? 1 : -1;
-        const nextTab = tabs[(currentIndex + offset + tabs.length) % tabs.length];
-        activateAiSubtab(nextTab.dataset.aiTab);
-        nextTab.focus();
-      });
-    });
-
     const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
     const themePageBtn = panel.querySelector('[data-open-theme-page]');
     if (themePageBtn) themePageBtn.addEventListener('click', openThemeSubpage);
@@ -7187,9 +6996,11 @@
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
     const modelStatusDiv = panel.querySelector('#model-status');
+    const modelSaveBtn = panel.querySelector('#model-save-btn');
 
     let modelCurrentConfig = null;
     let modelEditingTemplates = [];
+    let modelActiveTemplate = '';
 
     function showModelStatus(msg, type) {
       modelStatusDiv.textContent = msg;
@@ -7197,86 +7008,107 @@
     }
 
     function renderClaudeConfigArea() {
-      const providers = modelEditingTemplates;
-      const hasSnapshot = modelCurrentConfig?.localSnapshot && Object.keys(modelCurrentConfig.localSnapshot).length > 0
-        && (modelCurrentConfig.localSnapshot.apiKey || modelCurrentConfig.localSnapshot.apiBase);
+      const isLocal = modelActiveTemplate === '';
+      const tplOptions = modelEditingTemplates.map(t =>
+        `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`
+      ).join('');
 
+      if (isLocal) {
+        const hasSnapshot = modelCurrentConfig?.localSnapshot && Object.keys(modelCurrentConfig.localSnapshot).length > 0
+          && (modelCurrentConfig.localSnapshot.apiKey || modelCurrentConfig.localSnapshot.apiBase);
+        claudeConfigArea.innerHTML = `
+          <div class="settings-field">
+            <label>激活模板</label>
+            <div style="display:flex;gap:6px;align-items:center">
+              <select class="settings-select" id="claude-tpl-select" style="flex:1">
+                <option value="__local__" selected>本地配置</option>
+                ${tplOptions}
+                <option value="__new__">+ 新建模板</option>
+              </select>
+              <button class="btn-test" id="claude-info-btn" style="padding:4px 10px">说明</button>
+              <button class="btn-test" id="claude-read-local-btn" style="padding:4px 10px">读取当前配置</button>
+              ${hasSnapshot ? '<button class="btn-test" id="claude-restore-btn" style="padding:4px 10px">恢复快照</button>' : ''}
+            </div>
+          </div>
+          <div class="settings-inline-note">
+            Agent 直接使用本机 <code>~/.claude/settings.json</code> 中的 API 信息，不会覆盖或修改本机配置。
+          </div>
+        `;
+        panel.querySelector('#claude-tpl-select').addEventListener('change', (e) => {
+          if (e.target.value === '__new__') {
+            const newName = prompt('输入新模板名称:');
+            if (!newName || !newName.trim()) { e.target.value = '__local__'; return; }
+            const n = newName.trim();
+            if (modelEditingTemplates.find(t => t.name === n)) { alert('模板名称已存在'); e.target.value = '__local__'; return; }
+            modelEditingTemplates.push({ name: n, apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' });
+            modelActiveTemplate = n;
+            renderClaudeConfigArea();
+            openTplEditModal();
+          } else {
+            modelActiveTemplate = e.target.value;
+            renderClaudeConfigArea();
+          }
+        });
+        panel.querySelector('#claude-info-btn').addEventListener('click', showClaudeLocalInfoModal);
+        panel.querySelector('#claude-read-local-btn').addEventListener('click', () => send({ type: 'read_claude_local_config' }));
+        const restoreBtn = panel.querySelector('#claude-restore-btn');
+        if (restoreBtn) restoreBtn.addEventListener('click', () => send({ type: 'restore_claude_local_snapshot' }));
+        return;
+      }
+
+      // Custom template selected
+      const tpl = modelEditingTemplates.find(t => t.name === modelActiveTemplate);
+      const summary = tpl ? `API Key: <code>${tpl.apiKey ? '已设置' : '未设置'}</code> · Base: <code>${escapeHtml(tpl.apiBase || '默认')}</code>` : '';
       claudeConfigArea.innerHTML = `
-        <div class="settings-inline-note">
-          在此管理 Claude 供应商。添加供应商后，可在聊天页面的模型选择器中直接切换，无需回到设置页。
-          ${hasSnapshot ? '<br>已检测到本地配置快照，<button type="button" class="settings-link-btn" id="claude-restore-btn">恢复快照</button>。' : ''}
-        </div>
-        <div class="provider-list">
-          <div class="provider-row provider-row-builtin">
-            <div class="provider-row-main">
-              <div class="provider-row-title">本地登录态</div>
-              <div class="provider-row-meta">
-                <span class="provider-badge ready">内置</span>
-                <span class="provider-badge muted">使用本机 ~/.claude/ 配置</span>
-              </div>
-            </div>
-            <div class="provider-row-actions">
-              <button type="button" class="btn-test" data-claude-local-info="1">说明</button>
-            </div>
-          </div>
-          ${providers.length === 0 ? '' : providers.map((tpl, i) => {
-            const hasKey = !!tpl.apiKey;
-            const hasBase = !!tpl.apiBase;
-            return `
-              <div class="provider-row">
-                <div class="provider-row-main">
-                  <div class="provider-row-title">${escapeHtml(tpl.name)}</div>
-                  <div class="provider-row-meta">
-                    <span class="provider-badge ${hasKey ? 'ready' : 'muted'}">Key${hasKey ? '已设' : '未设'}</span>
-                    <span class="provider-badge ${hasBase ? 'ready' : 'muted'}">Base${hasBase ? '已设' : '默认'}</span>
-                  </div>
-                </div>
-                <div class="provider-row-actions">
-                  <button type="button" class="btn-test" data-claude-edit="${i}">编辑</button>
-                  <button type="button" class="provider-delete" data-claude-delete="${i}" aria-label="删除">×</button>
-                </div>
-              </div>
-            `;
-          }).join('')}
-          <div class="provider-empty">
-            <button type="button" class="provider-add" data-claude-add="1">＋ 添加供应商</button>
+        <div class="settings-field">
+          <label>激活模板</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select class="settings-select" id="claude-tpl-select" style="flex:1">
+              <option value="__local__">本地配置</option>
+              ${tplOptions}
+              <option value="__new__">+ 新建模板</option>
+            </select>
+            <button class="btn-test" id="model-tpl-edit" style="padding:4px 10px">编辑</button>
+            <button class="btn-test" id="model-tpl-del" title="删除" style="padding:4px 8px">删除</button>
           </div>
         </div>
+        <div class="settings-inline-note">${summary}</div>
       `;
 
-      claudeConfigArea.querySelector('[data-claude-local-info]')?.addEventListener('click', () => {
-        if (typeof showClaudeLocalInfoModal === 'function') showClaudeLocalInfoModal();
+      panel.querySelector('#claude-tpl-select').addEventListener('change', (e) => {
+        if (e.target.value === '__new__') {
+          const newName = prompt('输入新模板名称:');
+          if (!newName || !newName.trim()) { e.target.value = escapeHtml(modelActiveTemplate); return; }
+          const n = newName.trim();
+          if (modelEditingTemplates.find(t => t.name === n)) { alert('模板名称已存在'); e.target.value = escapeHtml(modelActiveTemplate); return; }
+          modelEditingTemplates.push({ name: n, apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' });
+          modelActiveTemplate = n;
+          renderClaudeConfigArea();
+          openTplEditModal();
+        } else if (e.target.value === '__local__') {
+          modelActiveTemplate = '';
+          renderClaudeConfigArea();
+        } else {
+          modelActiveTemplate = e.target.value;
+          renderClaudeConfigArea();
+        }
       });
-
-      claudeConfigArea.querySelector('[data-claude-add]')?.addEventListener('click', () => {
-        openTplEditModal('');
-      });
-      claudeConfigArea.querySelectorAll('[data-claude-edit]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const i = Number(btn.dataset.claudeEdit);
-          const tpl = modelEditingTemplates[i];
-          if (!tpl) return;
-          openTplEditModal(tpl.name);
-        });
-      });
-      claudeConfigArea.querySelectorAll('[data-claude-delete]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const i = Number(btn.dataset.claudeDelete);
-          const tpl = modelEditingTemplates[i];
-          if (!tpl) return;
-          if (!confirm(`确认删除供应商「${tpl.name}」?`)) return;
-          modelEditingTemplates.splice(i, 1);
+      panel.querySelector('#model-tpl-edit').addEventListener('click', () => openTplEditModal());
+      const delBtn = panel.querySelector('#model-tpl-del');
+      if (delBtn) {
+        delBtn.addEventListener('click', () => {
+          if (!modelActiveTemplate) return;
+          if (!confirm(`确认删除模板「${modelActiveTemplate}」?`)) return;
+          modelEditingTemplates = modelEditingTemplates.filter(t => t.name !== modelActiveTemplate);
+          modelActiveTemplate = modelEditingTemplates[0]?.name || '';
           renderClaudeConfigArea();
         });
-      });
-      const restoreBtn = claudeConfigArea.querySelector('#claude-restore-btn');
-      if (restoreBtn) restoreBtn.addEventListener('click', () => send({ type: 'restore_claude_local_snapshot' }));
+      }
     }
 
-    function openTplEditModal(tplName) {
-      let tpl = tplName ? modelEditingTemplates.find(t => t.name === tplName) : null;
-      const isNew = !tpl;
-      if (isNew) tpl = { name: '', apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' };
+    function openTplEditModal() {
+      const tpl = modelEditingTemplates.find(t => t.name === modelActiveTemplate);
+      if (!tpl) return;
       const modalOverlay = document.createElement('div');
       modalOverlay.className = 'settings-overlay';
       modalOverlay.style.zIndex = '10001';
@@ -7285,12 +7117,12 @@
       modal.style.maxWidth = '460px';
       modal.innerHTML = `
         <div class="settings-header">
-          <h3>${isNew ? '新建供应商' : `编辑供应商: ${escapeHtml(tpl.name)}`}</h3>
+          <h3>编辑模板: ${escapeHtml(tpl.name)}</h3>
           <button class="settings-close" id="tpl-modal-close">&times;</button>
         </div>
         <div class="settings-field">
-          <label>供应商名称</label>
-          <input type="text" id="tpl-ed-name" placeholder="例如 官方API / OpenRouter" value="${escapeHtml(tpl.name)}">
+          <label>模板名称</label>
+          <input type="text" id="tpl-ed-name" value="${escapeHtml(tpl.name)}">
         </div>
         <div class="settings-field">
           <label>API Key</label>
@@ -7380,14 +7212,10 @@
       modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
       modal.querySelector('#tpl-ed-ok').addEventListener('click', () => {
         const newName = modal.querySelector('#tpl-ed-name').value.trim();
-        if (!newName) { alert('请填写供应商名称'); return; }
-        if (isNew) {
-          if (modelEditingTemplates.find(t => t.name === newName)) { alert('供应商名称已存在'); return; }
+        if (newName && newName !== tpl.name) {
+          if (modelEditingTemplates.find(t => t.name === newName && t !== tpl)) { alert('模板名称已存在'); return; }
           tpl.name = newName;
-          modelEditingTemplates.push(tpl);
-        } else {
-          if (newName !== tpl.name && modelEditingTemplates.find(t => t.name === newName && t !== tpl)) { alert('供应商名称已存在'); return; }
-          tpl.name = newName;
+          modelActiveTemplate = newName;
         }
         tpl.apiKey = modal.querySelector('#tpl-ed-apikey').value.trim();
         tpl.apiBase = modal.querySelector('#tpl-ed-apibase').value.trim();
@@ -7397,9 +7225,6 @@
         tpl.haikuModel = modal.querySelector('#tpl-ed-haiku').value.trim();
         closeModal();
         renderClaudeConfigArea();
-        // Auto-save to backend
-        send({ type: 'save_model_config', config: { mode: 'custom', activeTemplate: '', templates: modelEditingTemplates, localSnapshot: modelCurrentConfig?.localSnapshot || {} } });
-        showModelStatus('已保存', 'success');
       });
     }
 
@@ -7527,9 +7352,26 @@
       modal.querySelector('#kimi-info-ok').addEventListener('click', closeModal);
     }
 
+    modelSaveBtn.addEventListener('click', () => {
+      const isLocal = modelActiveTemplate === '';
+      const config = {
+        mode: isLocal ? 'local' : 'custom',
+        activeTemplate: isLocal ? '' : modelActiveTemplate,
+        templates: modelEditingTemplates,
+        localSnapshot: modelCurrentConfig?.localSnapshot || {},
+      };
+      send({ type: 'save_model_config', config });
+      showModelStatus('已保存', 'success');
+    });
+
     _onModelConfig = (config) => {
       modelCurrentConfig = config;
       modelEditingTemplates = (config.templates || []).map(t => Object.assign({}, t));
+      if (config.mode === 'local') {
+        modelActiveTemplate = '';
+      } else {
+        modelActiveTemplate = config.activeTemplate || (modelEditingTemplates[0]?.name || '');
+      }
       renderClaudeConfigArea();
     };
 
@@ -7583,9 +7425,11 @@
     // === Codex Config UI ===
     const codexConfigArea = panel.querySelector('#codex-config-area');
     const codexStatus = panel.querySelector('#codex-status');
+    const codexSaveBtn = panel.querySelector('#codex-save-btn');
 
     let currentCodexConfig = null;
     let codexEditingProfiles = [];
+    let codexActiveProfile = '';
 
     function showCodexStatus(msg, type) {
       codexStatus.textContent = msg;
@@ -7593,73 +7437,87 @@
     }
 
     function renderCodexConfigArea() {
-      const profiles = codexEditingProfiles;
+      const isLocal = codexActiveProfile === '';
+      const profileOptions = codexEditingProfiles.map((profile) =>
+        `<option value="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</option>`
+      ).join('');
+
+      if (isLocal) {
+        codexConfigArea.innerHTML = `
+          <div class="settings-field">
+            <label>激活 Profile</label>
+            <div style="display:flex;gap:6px;align-items:center">
+              <select class="settings-select" id="codex-profile-select" style="flex:1">
+                <option value="__local__" selected>本地配置</option>
+                ${profileOptions}
+                <option value="__new__">+ 新建 Profile</option>
+              </select>
+              <button class="btn-test" id="codex-info-btn" style="padding:4px 10px">说明</button>
+              <button class="btn-test" id="codex-read-local-btn" style="padding:4px 10px">读取当前配置</button>
+            </div>
+          </div>
+          <div class="settings-inline-note">
+            直接复用本机 <code>codex</code> 的登录态与 <code>~/.codex/config.toml</code>。
+          </div>
+        `;
+        panel.querySelector('#codex-profile-select').addEventListener('change', (e) => {
+          if (e.target.value === '__new__') {
+            openCodexProfileModal();
+          } else if (e.target.value === '__local__') {
+            codexActiveProfile = '';
+            renderCodexConfigArea();
+          } else {
+            codexActiveProfile = e.target.value;
+            renderCodexConfigArea();
+          }
+        });
+        panel.querySelector('#codex-info-btn').addEventListener('click', showCodexLocalInfoModal);
+        panel.querySelector('#codex-read-local-btn').addEventListener('click', () => send({ type: 'read_codex_local_config' }));
+        return;
+      }
+
+      // Custom profile selected
+      const currentProfile = codexEditingProfiles.find((profile) => profile.name === codexActiveProfile);
+      const summaryBase = currentProfile?.apiBase ? escapeHtml(currentProfile.apiBase) : '默认';
+
       codexConfigArea.innerHTML = `
-        <div class="settings-inline-note">
-          在此管理 Codex 供应商。添加供应商后，可在聊天页面的模型选择器中直接切换，无需回到设置页。
+        <div class="settings-field">
+          <label>激活 Profile</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select class="settings-select" id="codex-profile-select" style="flex:1">
+              <option value="__local__">本地配置</option>
+              ${profileOptions}
+              <option value="__new__">+ 新建 Profile</option>
+            </select>
+            <button class="btn-test" id="codex-profile-edit" style="padding:4px 10px">编辑</button>
+            <button class="btn-test" id="codex-profile-del" title="删除" style="padding:4px 8px">删除</button>
+          </div>
         </div>
-        <div class="provider-list">
-          <div class="provider-row provider-row-builtin">
-            <div class="provider-row-main">
-              <div class="provider-row-title">本地登录态</div>
-              <div class="provider-row-meta">
-                <span class="provider-badge ready">内置</span>
-                <span class="provider-badge muted">使用本机 ~/.codex/ 配置</span>
-              </div>
-            </div>
-            <div class="provider-row-actions">
-              <button type="button" class="btn-test" data-codex-local-info="1">说明</button>
-            </div>
-          </div>
-          ${profiles.length === 0 ? '' : profiles.map((profile, i) => {
-            const hasKey = !!profile.apiKey;
-            const hasBase = !!profile.apiBase;
-            return `
-              <div class="provider-row">
-                <div class="provider-row-main">
-                  <div class="provider-row-title">${escapeHtml(profile.name)}</div>
-                  <div class="provider-row-meta">
-                    <span class="provider-badge ${hasKey ? 'ready' : 'muted'}">Key${hasKey ? '已设' : '未设'}</span>
-                    <span class="provider-badge ${hasBase ? 'ready' : 'muted'}">Base${hasBase ? '已设' : '默认'}</span>
-                  </div>
-                </div>
-                <div class="provider-row-actions">
-                  <button type="button" class="btn-test" data-codex-edit="${i}">编辑</button>
-                  <button type="button" class="provider-delete" data-codex-delete="${i}" aria-label="删除">×</button>
-                </div>
-              </div>
-            `;
-          }).join('')}
-          <div class="provider-empty">
-            <button type="button" class="provider-add" data-codex-add="1">＋ 添加供应商</button>
-          </div>
+        <div class="settings-inline-note">
+          当前 Profile：<strong>${escapeHtml(currentProfile?.name || '未选择')}</strong> · API Base：<code>${summaryBase}</code>
         </div>
       `;
 
-      codexConfigArea.querySelector('[data-codex-local-info]')?.addEventListener('click', () => {
-        if (typeof showCodexLocalInfoModal === 'function') showCodexLocalInfoModal();
-      });
-
-      codexConfigArea.querySelector('[data-codex-add]')?.addEventListener('click', () => {
-        openCodexProfileModal();
-      });
-      codexConfigArea.querySelectorAll('[data-codex-edit]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const i = Number(btn.dataset.codexEdit);
-          const profile = codexEditingProfiles[i];
-          if (!profile) return;
-          openCodexProfileModal(profile.name);
-        });
-      });
-      codexConfigArea.querySelectorAll('[data-codex-delete]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const i = Number(btn.dataset.codexDelete);
-          const profile = codexEditingProfiles[i];
-          if (!profile) return;
-          if (!confirm(`确认删除供应商「${profile.name}」?`)) return;
-          codexEditingProfiles.splice(i, 1);
+      panel.querySelector('#codex-profile-select').addEventListener('change', (e) => {
+        if (e.target.value === '__new__') {
+          openCodexProfileModal();
+        } else if (e.target.value === '__local__') {
+          codexActiveProfile = '';
           renderCodexConfigArea();
-        });
+        } else {
+          codexActiveProfile = e.target.value;
+          renderCodexConfigArea();
+        }
+      });
+      panel.querySelector('#codex-profile-edit').addEventListener('click', () => {
+        openCodexProfileModal(codexActiveProfile);
+      });
+      panel.querySelector('#codex-profile-del').addEventListener('click', () => {
+        if (!codexActiveProfile) return;
+        if (!confirm(`确认删除 Codex Profile「${codexActiveProfile}」?`)) return;
+        codexEditingProfiles = codexEditingProfiles.filter((profile) => profile.name !== codexActiveProfile);
+        codexActiveProfile = codexEditingProfiles[0]?.name || '';
+        renderCodexConfigArea();
       });
     }
 
@@ -7707,11 +7565,11 @@
         const name = modal.querySelector('#codex-profile-name').value.trim();
         const apiKey = modal.querySelector('#codex-profile-apikey').value.trim();
         const apiBase = modal.querySelector('#codex-profile-apibase').value.trim();
-        if (!name) { alert('请填写供应商名称'); return; }
+        if (!name) { alert('请填写 Profile 名称'); return; }
         if (!apiKey) { alert('请填写 API Key'); return; }
         if (!apiBase) { alert('请填写 API Base URL'); return; }
         const existing = codexEditingProfiles.find((profile) => profile.name === name);
-        if (existing && existing !== current) { alert('供应商名称已存在'); return; }
+        if (existing && existing !== current) { alert('Profile 名称已存在'); return; }
         if (current) {
           current.name = name;
           current.apiKey = apiKey;
@@ -7719,19 +7577,39 @@
         } else {
           codexEditingProfiles.push({ name, apiKey, apiBase });
         }
+        codexActiveProfile = name;
         closeModal();
         renderCodexConfigArea();
-        // Auto-save to backend
-        send({ type: 'save_codex_config', config: { mode: 'custom', activeProfile: '', profiles: codexEditingProfiles, enableSearch: false, localSnapshot: currentCodexConfig?.localSnapshot || {} } });
-        showCodexStatus('已保存', 'success');
       });
     }
 
     _onCodexConfig = (config) => {
       currentCodexConfig = config || {};
       codexEditingProfiles = (currentCodexConfig.profiles || []).map((profile) => ({ ...profile }));
+      if (currentCodexConfig.mode === 'local') {
+        codexActiveProfile = '';
+      } else {
+        codexActiveProfile = currentCodexConfig.activeProfile || (codexEditingProfiles[0]?.name || '');
+      }
       renderCodexConfigArea();
     };
+
+    codexSaveBtn.addEventListener('click', () => {
+      const isLocal = codexActiveProfile === '';
+      if (!isLocal && codexEditingProfiles.length === 0) {
+        showCodexStatus('自定义模式至少需要一个 Codex Profile', 'error');
+        return;
+      }
+      const config = {
+        mode: isLocal ? 'local' : 'custom',
+        activeProfile: isLocal ? '' : codexActiveProfile,
+        profiles: codexEditingProfiles,
+        enableSearch: false,
+        localSnapshot: currentCodexConfig?.localSnapshot || {},
+      };
+      send({ type: 'save_codex_config', config });
+      showCodexStatus('已保存', 'success');
+    });
 
     _onCodexLocalConfig = (msg) => {
       const config = msg.config || {};
