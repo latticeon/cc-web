@@ -6808,7 +6808,7 @@
           <div class="settings-section-title">Claude API 配置</div>
           <div id="claude-config-area"></div>
           <div class="settings-actions">
-            <button class="btn-save" id="model-save-btn">保存 Claude 配置</button>
+            <button class="btn-test" id="claude-add-provider-btn">+ 添加自定义供应商</button>
           </div>
           <div class="settings-status" id="model-status"></div>
 
@@ -6817,7 +6817,7 @@
           <div class="settings-section-title">Codex API 配置</div>
           <div id="codex-config-area"></div>
           <div class="settings-actions">
-            <button class="btn-save" id="codex-save-btn">保存 Codex 配置</button>
+            <button class="btn-test" id="codex-add-provider-btn">+ 添加自定义供应商</button>
           </div>
           <div class="settings-status" id="codex-status"></div>
 
@@ -7146,7 +7146,7 @@
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
     const modelStatusDiv = panel.querySelector('#model-status');
-    const modelSaveBtn = panel.querySelector('#model-save-btn');
+    const claudeAddProviderBtn = panel.querySelector('#claude-add-provider-btn');
 
     let modelCurrentConfig = null;
     let modelEditingTemplates = [];
@@ -7158,103 +7158,84 @@
     }
 
     function renderClaudeConfigArea() {
-      const isLocal = modelActiveTemplate === '';
-      const tplOptions = modelEditingTemplates.map(t =>
-        `<option value="${escapeHtml(t.name)}"${t.name === modelActiveTemplate ? ' selected' : ''}>${escapeHtml(t.name)}</option>`
-      ).join('');
+      const hasSnapshot = modelCurrentConfig?.localSnapshot && Object.keys(modelCurrentConfig.localSnapshot).length > 0
+        && (modelCurrentConfig.localSnapshot.apiKey || modelCurrentConfig.localSnapshot.apiBase);
+      const localActive = modelActiveTemplate === '';
 
-      if (isLocal) {
-        const hasSnapshot = modelCurrentConfig?.localSnapshot && Object.keys(modelCurrentConfig.localSnapshot).length > 0
-          && (modelCurrentConfig.localSnapshot.apiKey || modelCurrentConfig.localSnapshot.apiBase);
-        claudeConfigArea.innerHTML = `
-          <div class="settings-field">
-            <label>模板管理</label>
-            <div style="display:flex;gap:6px;align-items:center">
-              <select class="settings-select" id="claude-tpl-select" style="flex:1">
-                <option value="__local__" selected>本地配置</option>
-                ${tplOptions}
-                <option value="__new__">+ 新建模板</option>
-              </select>
-              <button class="btn-test" id="claude-info-btn" style="padding:4px 10px">说明</button>
-              <button class="btn-test" id="claude-read-local-btn" style="padding:4px 10px">读取当前配置</button>
-              ${hasSnapshot ? '<button class="btn-test" id="claude-restore-btn" style="padding:4px 10px">恢复快照</button>' : ''}
+      const localCard = `
+        <div class="provider-card${localActive ? ' active' : ''}" data-provider="__local__">
+          <div class="provider-card-main">
+            <div class="provider-card-title">本地配置</div>
+            <div class="provider-card-meta">使用本机 ~/.claude/settings.json 中的 API 配置</div>
+          </div>
+          <div class="provider-card-actions">
+            <button class="btn-test" data-claude-action="info">说明</button>
+            <button class="btn-test" data-claude-action="read">读取当前配置</button>
+            ${hasSnapshot ? '<button class="btn-test" data-claude-action="restore">恢复快照</button>' : ''}
+            <button class="btn-test" data-claude-action="activate" ${localActive ? 'disabled' : ''}>${localActive ? '已选中' : '切换'}</button>
+          </div>
+        </div>
+      `;
+
+      const customCards = modelEditingTemplates.map(t => {
+        const isActive = t.name === modelActiveTemplate;
+        return `
+          <div class="provider-card${isActive ? ' active' : ''}" data-provider="${escapeHtml(t.name)}">
+            <div class="provider-card-main">
+              <div class="provider-card-title">${escapeHtml(t.name)}</div>
+              <div class="provider-card-meta">API Key: ${t.apiKey ? '已设置' : '未设置'} · Base: ${escapeHtml(t.apiBase || '默认')}</div>
+            </div>
+            <div class="provider-card-actions">
+              <button class="btn-test" data-claude-action="edit" data-name="${escapeHtml(t.name)}">编辑</button>
+              <button class="btn-test" data-claude-action="delete" data-name="${escapeHtml(t.name)}">删除</button>
+              <button class="btn-test" data-claude-action="activate" data-name="${escapeHtml(t.name)}" ${isActive ? 'disabled' : ''}>${isActive ? '已选中' : '切换'}</button>
             </div>
           </div>
-          <div class="settings-inline-note">
-          模板仅在此处维护；当前 Claude 使用的供应商和模型请在对话模型选择器中切换，并对所有 Claude 对话全局生效。
-          </div>
         `;
-        panel.querySelector('#claude-tpl-select').addEventListener('change', (e) => {
-          if (e.target.value === '__new__') {
-            const newName = prompt('输入新模板名称:');
-            if (!newName || !newName.trim()) { e.target.value = '__local__'; return; }
-            const n = newName.trim();
-            if (modelEditingTemplates.find(t => t.name === n)) { alert('模板名称已存在'); e.target.value = '__local__'; return; }
-            modelEditingTemplates.push({ name: n, apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' });
-            modelActiveTemplate = n;
+      }).join('');
+
+      const emptyHint = modelEditingTemplates.length === 0
+        ? '<div class="settings-inline-note" style="margin-bottom:12px">暂无自定义供应商，点击下方按钮添加。</div>'
+        : '';
+
+      claudeConfigArea.innerHTML = `
+        <div class="provider-list">
+          ${localCard}
+          ${customCards}
+        </div>
+        ${emptyHint}
+        <div class="settings-inline-note">
+          供应商仅在此处维护；当前 Claude 使用的供应商和模型请在对话模型选择器中切换，并对所有 Claude 对话全局生效。
+        </div>
+      `;
+
+      // Bind events
+      claudeConfigArea.querySelectorAll('[data-claude-action]').forEach(btn => {
+        const action = btn.getAttribute('data-claude-action');
+        btn.addEventListener('click', () => {
+          const name = btn.getAttribute('data-name');
+          if (action === 'info') {
+            showClaudeLocalInfoModal();
+          } else if (action === 'read') {
+            send({ type: 'read_claude_local_config' });
+          } else if (action === 'restore') {
+            send({ type: 'restore_claude_local_snapshot' });
+          } else if (action === 'activate') {
+            modelActiveTemplate = name || '';
             renderClaudeConfigArea();
+          } else if (action === 'edit') {
+            modelActiveTemplate = name;
             openTplEditModal();
-          } else {
-            modelActiveTemplate = e.target.value;
+          } else if (action === 'delete') {
+            if (!name) return;
+            if (!confirm(`确认删除模板「${name}」?`)) return;
+            if (modelCurrentConfig?.activeTemplate === name) modelCurrentConfig.activeTemplate = '';
+            modelEditingTemplates = modelEditingTemplates.filter(t => t.name !== name);
+            if (modelActiveTemplate === name) modelActiveTemplate = modelEditingTemplates[0]?.name || '';
             renderClaudeConfigArea();
           }
         });
-        panel.querySelector('#claude-info-btn').addEventListener('click', showClaudeLocalInfoModal);
-        panel.querySelector('#claude-read-local-btn').addEventListener('click', () => send({ type: 'read_claude_local_config' }));
-        const restoreBtn = panel.querySelector('#claude-restore-btn');
-        if (restoreBtn) restoreBtn.addEventListener('click', () => send({ type: 'restore_claude_local_snapshot' }));
-        return;
-      }
-
-      // Custom template selected
-      const tpl = modelEditingTemplates.find(t => t.name === modelActiveTemplate);
-      const summary = tpl ? `API Key: <code>${tpl.apiKey ? '已设置' : '未设置'}</code> · Base: <code>${escapeHtml(tpl.apiBase || '默认')}</code>` : '';
-      claudeConfigArea.innerHTML = `
-        <div class="settings-field">
-          <label>模板管理</label>
-          <div style="display:flex;gap:6px;align-items:center">
-            <select class="settings-select" id="claude-tpl-select" style="flex:1">
-              <option value="__local__">本地配置</option>
-              ${tplOptions}
-              <option value="__new__">+ 新建模板</option>
-            </select>
-            <button class="btn-test" id="model-tpl-edit" style="padding:4px 10px">编辑</button>
-            <button class="btn-test" id="model-tpl-del" title="删除" style="padding:4px 8px">删除</button>
-          </div>
-        </div>
-        <div class="settings-inline-note">${summary}</div>
-      `;
-
-      panel.querySelector('#claude-tpl-select').addEventListener('change', (e) => {
-        if (e.target.value === '__new__') {
-          const newName = prompt('输入新模板名称:');
-          if (!newName || !newName.trim()) { e.target.value = escapeHtml(modelActiveTemplate); return; }
-          const n = newName.trim();
-          if (modelEditingTemplates.find(t => t.name === n)) { alert('模板名称已存在'); e.target.value = escapeHtml(modelActiveTemplate); return; }
-          modelEditingTemplates.push({ name: n, apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' });
-          modelActiveTemplate = n;
-          renderClaudeConfigArea();
-          openTplEditModal();
-        } else if (e.target.value === '__local__') {
-          modelActiveTemplate = '';
-          renderClaudeConfigArea();
-        } else {
-          modelActiveTemplate = e.target.value;
-          renderClaudeConfigArea();
-        }
       });
-      panel.querySelector('#model-tpl-edit').addEventListener('click', () => openTplEditModal());
-      const delBtn = panel.querySelector('#model-tpl-del');
-      if (delBtn) {
-        delBtn.addEventListener('click', () => {
-          if (!modelActiveTemplate) return;
-          if (!confirm(`确认删除模板「${modelActiveTemplate}」?`)) return;
-          if (modelCurrentConfig?.activeTemplate === modelActiveTemplate) modelCurrentConfig.activeTemplate = '';
-          modelEditingTemplates = modelEditingTemplates.filter(t => t.name !== modelActiveTemplate);
-          modelActiveTemplate = modelEditingTemplates[0]?.name || '';
-          renderClaudeConfigArea();
-        });
-      }
     }
 
     function openTplEditModal() {
@@ -7505,8 +7486,20 @@
       modal.querySelector('#kimi-info-ok').addEventListener('click', closeModal);
     }
 
-    modelSaveBtn.addEventListener('click', () => {
-      const activeTemplate = modelCurrentConfig?.activeTemplate || '';
+    claudeAddProviderBtn.addEventListener('click', () => {
+      const newName = prompt('输入新供应商名称:');
+      if (!newName || !newName.trim()) return;
+      const n = newName.trim();
+      if (modelEditingTemplates.find(t => t.name === n)) { alert('供应商名称已存在'); return; }
+      modelEditingTemplates.push({ name: n, apiKey: '', apiBase: '', defaultModel: '', opusModel: '', sonnetModel: '', haikuModel: '' });
+      modelActiveTemplate = n;
+      renderClaudeConfigArea();
+      openTplEditModal();
+    });
+
+    // Auto-save on every change (add/edit/delete/switch)
+    function autoSaveClaudeConfig() {
+      const activeTemplate = modelActiveTemplate;
       const config = {
         mode: activeTemplate ? 'custom' : 'local',
         activeTemplate,
@@ -7515,7 +7508,15 @@
       };
       send({ type: 'save_model_config', config });
       showModelStatus('已保存', 'success');
-    });
+    }
+
+    // Wrap renderClaudeConfigArea to auto-save after changes
+    const _originalRenderClaude = renderClaudeConfigArea;
+    renderClaudeConfigArea = function() {
+      const wasInitialized = claudeConfigArea.innerHTML !== '';
+      _originalRenderClaude();
+      if (wasInitialized) autoSaveClaudeConfig();
+    };
 
     _onModelConfig = (config) => {
       modelCurrentConfig = config;
@@ -7578,7 +7579,7 @@
     // === Codex Config UI ===
     const codexConfigArea = panel.querySelector('#codex-config-area');
     const codexStatus = panel.querySelector('#codex-status');
-    const codexSaveBtn = panel.querySelector('#codex-save-btn');
+    const codexAddProviderBtn = panel.querySelector('#codex-add-provider-btn');
 
     let currentCodexConfig = null;
     let codexEditingProfiles = [];
@@ -7590,88 +7591,77 @@
     }
 
     function renderCodexConfigArea() {
-      const isLocal = codexActiveProfile === '';
-      const profileOptions = codexEditingProfiles.map((profile) =>
-        `<option value="${escapeHtml(profile.name)}"${profile.name === codexActiveProfile ? ' selected' : ''}>${escapeHtml(profile.name)}</option>`
-      ).join('');
+      const localActive = codexActiveProfile === '';
 
-      if (isLocal) {
-        codexConfigArea.innerHTML = `
-          <div class="settings-field">
-            <label>Profile 管理</label>
-            <div style="display:flex;gap:6px;align-items:center">
-              <select class="settings-select" id="codex-profile-select" style="flex:1">
-                <option value="__local__" selected>本地配置</option>
-                ${profileOptions}
-                <option value="__new__">+ 新建 Profile</option>
-              </select>
-              <button class="btn-test" id="codex-info-btn" style="padding:4px 10px">说明</button>
-              <button class="btn-test" id="codex-read-local-btn" style="padding:4px 10px">读取当前配置</button>
-            </div>
+      const localCard = `
+        <div class="provider-card${localActive ? ' active' : ''}" data-provider="__local__">
+          <div class="provider-card-main">
+            <div class="provider-card-title">本地配置</div>
+            <div class="provider-card-meta">使用本机 ~/.codex/ 中的登录态与 config.toml</div>
           </div>
-          <div class="settings-inline-note">
-          Profile 仅在此处维护；当前 Codex 使用的供应商和模型请在对话模型选择器中切换，并对所有 Codex 对话全局生效。
+          <div class="provider-card-actions">
+            <button class="btn-test" data-codex-action="info">说明</button>
+            <button class="btn-test" data-codex-action="read">读取当前配置</button>
+            <button class="btn-test" data-codex-action="activate" ${localActive ? 'disabled' : ''}>${localActive ? '已选中' : '切换'}</button>
           </div>
-        `;
-        panel.querySelector('#codex-profile-select').addEventListener('change', (e) => {
-          if (e.target.value === '__new__') {
-            openCodexProfileModal();
-          } else if (e.target.value === '__local__') {
-            codexActiveProfile = '';
-            renderCodexConfigArea();
-          } else {
-            codexActiveProfile = e.target.value;
-            renderCodexConfigArea();
-          }
-        });
-        panel.querySelector('#codex-info-btn').addEventListener('click', showCodexLocalInfoModal);
-        panel.querySelector('#codex-read-local-btn').addEventListener('click', () => send({ type: 'read_codex_local_config' }));
-        return;
-      }
-
-      // Custom profile selected
-      const currentProfile = codexEditingProfiles.find((profile) => profile.name === codexActiveProfile);
-      const summaryBase = currentProfile?.apiBase ? escapeHtml(currentProfile.apiBase) : '默认';
-
-      codexConfigArea.innerHTML = `
-        <div class="settings-field">
-          <label>Profile 管理</label>
-          <div style="display:flex;gap:6px;align-items:center">
-            <select class="settings-select" id="codex-profile-select" style="flex:1">
-              <option value="__local__">本地配置</option>
-              ${profileOptions}
-              <option value="__new__">+ 新建 Profile</option>
-            </select>
-            <button class="btn-test" id="codex-profile-edit" style="padding:4px 10px">编辑</button>
-            <button class="btn-test" id="codex-profile-del" title="删除" style="padding:4px 8px">删除</button>
-          </div>
-        </div>
-        <div class="settings-inline-note">
-          当前 Profile：<strong>${escapeHtml(currentProfile?.name || '未选择')}</strong> · API Base：<code>${summaryBase}</code>
         </div>
       `;
 
-      panel.querySelector('#codex-profile-select').addEventListener('change', (e) => {
-        if (e.target.value === '__new__') {
-          openCodexProfileModal();
-        } else if (e.target.value === '__local__') {
-          codexActiveProfile = '';
-          renderCodexConfigArea();
-        } else {
-          codexActiveProfile = e.target.value;
-          renderCodexConfigArea();
-        }
-      });
-      panel.querySelector('#codex-profile-edit').addEventListener('click', () => {
-        openCodexProfileModal(codexActiveProfile);
-      });
-      panel.querySelector('#codex-profile-del').addEventListener('click', () => {
-        if (!codexActiveProfile) return;
-        if (!confirm(`确认删除 Codex Profile「${codexActiveProfile}」?`)) return;
-        if (currentCodexConfig?.activeProfile === codexActiveProfile) currentCodexConfig.activeProfile = '';
-        codexEditingProfiles = codexEditingProfiles.filter((profile) => profile.name !== codexActiveProfile);
-        codexActiveProfile = codexEditingProfiles[0]?.name || '';
-        renderCodexConfigArea();
+      const customCards = codexEditingProfiles.map(p => {
+        const isActive = p.name === codexActiveProfile;
+        return `
+          <div class="provider-card${isActive ? ' active' : ''}" data-provider="${escapeHtml(p.name)}">
+            <div class="provider-card-main">
+              <div class="provider-card-title">${escapeHtml(p.name)}</div>
+              <div class="provider-card-meta">API Key: ${p.apiKey ? '已设置' : '未设置'} · Base: ${escapeHtml(p.apiBase || '默认')}</div>
+            </div>
+            <div class="provider-card-actions">
+              <button class="btn-test" data-codex-action="edit" data-name="${escapeHtml(p.name)}">编辑</button>
+              <button class="btn-test" data-codex-action="delete" data-name="${escapeHtml(p.name)}">删除</button>
+              <button class="btn-test" data-codex-action="activate" data-name="${escapeHtml(p.name)}" ${isActive ? 'disabled' : ''}>${isActive ? '已选中' : '切换'}</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const emptyHint = codexEditingProfiles.length === 0
+        ? '<div class="settings-inline-note" style="margin-bottom:12px">暂无自定义供应商，点击下方按钮添加。</div>'
+        : '';
+
+      codexConfigArea.innerHTML = `
+        <div class="provider-list">
+          ${localCard}
+          ${customCards}
+        </div>
+        ${emptyHint}
+        <div class="settings-inline-note">
+          供应商仅在此处维护；当前 Codex 使用的供应商和模型请在对话模型选择器中切换，并对所有 Codex 对话全局生效。
+        </div>
+      `;
+
+      // Bind events
+      codexConfigArea.querySelectorAll('[data-codex-action]').forEach(btn => {
+        const action = btn.getAttribute('data-codex-action');
+        btn.addEventListener('click', () => {
+          const name = btn.getAttribute('data-name');
+          if (action === 'info') {
+            showCodexLocalInfoModal();
+          } else if (action === 'read') {
+            send({ type: 'read_codex_local_config' });
+          } else if (action === 'activate') {
+            codexActiveProfile = name || '';
+            renderCodexConfigArea();
+          } else if (action === 'edit') {
+            openCodexProfileModal(name);
+          } else if (action === 'delete') {
+            if (!name) return;
+            if (!confirm(`确认删除 Codex Profile「${name}」?`)) return;
+            if (currentCodexConfig?.activeProfile === name) currentCodexConfig.activeProfile = '';
+            codexEditingProfiles = codexEditingProfiles.filter(p => p.name !== name);
+            if (codexActiveProfile === name) codexActiveProfile = codexEditingProfiles[0]?.name || '';
+            renderCodexConfigArea();
+          }
+        });
       });
     }
 
@@ -7750,12 +7740,13 @@
       renderCodexConfigArea();
     };
 
-    codexSaveBtn.addEventListener('click', () => {
-      const activeProfile = currentCodexConfig?.activeProfile || '';
-      if (activeProfile && codexEditingProfiles.length === 0) {
-        showCodexStatus('自定义模式至少需要一个 Codex Profile', 'error');
-        return;
-      }
+    codexAddProviderBtn.addEventListener('click', () => {
+      openCodexProfileModal();
+    });
+
+    // Auto-save on every change (add/edit/delete/switch)
+    function autoSaveCodexConfig() {
+      const activeProfile = codexActiveProfile;
       const config = {
         mode: activeProfile ? 'custom' : 'local',
         activeProfile,
@@ -7765,7 +7756,15 @@
       };
       send({ type: 'save_codex_config', config });
       showCodexStatus('已保存', 'success');
-    });
+    }
+
+    // Wrap renderCodexConfigArea to auto-save after changes
+    const _originalRenderCodex = renderCodexConfigArea;
+    renderCodexConfigArea = function() {
+      const wasInitialized = codexConfigArea.innerHTML !== '';
+      _originalRenderCodex();
+      if (wasInitialized) autoSaveCodexConfig();
+    };
 
     _onCodexLocalConfig = (msg) => {
       const config = msg.config || {};
