@@ -183,25 +183,14 @@ function getCliInstallInfo(command, args = ['--version']) {
 }
 
 function getCliInstallStatus() {
+  // codebuddy/kimi/opencode 已弃用，不再返回 CLI 安装状态
   const status = {
     claude: getCliInstallInfo(CLAUDE_PATH),
     codex: getCliInstallInfo(CODEX_PATH),
-    codebuddy: getCliInstallInfo(CODEBUDDY_PATH),
-    kimi: getCliInstallInfo(KIMI_PATH),
-    opencode: getCliInstallInfo(OPENCODE_PATH),
   };
   if (!status.codex.installed && process.platform === 'win32' && CODEX_PATH !== 'codex') {
     const fallback = getCliInstallInfo('codex');
     if (fallback.installed) status.codex = fallback;
-  }
-  if (!status.codebuddy.installed) {
-    for (const candidate of ['codebuddy', 'cbc']) {
-      const fallback = getCliInstallInfo(candidate);
-      if (fallback.installed) {
-        status.codebuddy = fallback;
-        break;
-      }
-    }
   }
   return status;
 }

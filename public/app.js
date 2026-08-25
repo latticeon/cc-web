@@ -110,68 +110,8 @@
         importConfirm: '将解析本地 Codex rollout 历史并导入当前 Web 视图。确认继续？',
       },
     },
-    {
-      id: 'codebuddy',
-      label: 'CodeBuddy',
-      avatar: '',
-      default: false,
-      defaults: { initialModel: '' },
-      modelControl: {
-        kind: 'dynamic',
-        title: '选择 CodeBuddy 模型',
-        loadingText: '正在加载 CodeBuddy 模型…',
-        emptyText: '未获取到 CodeBuddy 可用模型',
-        emptyLabel: '选择模型',
-        sourceLabel: 'CodeBuddy CLI',
-      },
-      import: null,
-    },
-    {
-      id: 'kimi',
-      label: 'Kimi',
-      avatar: '',
-      default: false,
-      defaults: { initialModel: '' },
-      modelControl: {
-        kind: 'dynamic',
-        title: '选择 Kimi 模型',
-        loadingText: '正在加载 Kimi 模型…',
-        emptyText: '未获取到 Kimi 可用模型',
-        emptyLabel: '选择模型',
-        sourceLabel: 'Kimi 配置',
-      },
-      import: null,
-    },
-    {
-      id: 'opencode',
-      label: 'OpenCode',
-      avatar: '',
-      default: false,
-      defaults: { initialModel: '' },
-      modelControl: {
-        kind: 'dynamic',
-        title: '选择 OpenCode 模型',
-        loadingText: '正在加载 OpenCode 模型…',
-        emptyText: '未获取到 OpenCode 可用模型',
-        emptyLabel: '选择模型',
-        sourceLabel: 'OpenCode CLI',
-      },
-      import: {
-        enabled: true,
-        requestType: 'list_agent_import_sessions',
-        actionType: 'import_agent_session',
-        payloadFields: ['sessionId'],
-        listStyle: 'flat',
-        buttonLabel: '导入本地 OpenCode 会话',
-        modalTitle: '导入本地 OpenCode 会话',
-        contextTitle: '从 OpenCode 本地历史导入',
-        contextCopy: '读取本地 OpenCode 会话历史，恢复用户消息、助手输出、推理过程与工具调用。',
-        loadingText: '正在加载 OpenCode 本地历史…',
-        emptyText: '未找到本地 OpenCode 会话',
-        reimportConfirm: '已导入过此 OpenCode 会话，重新导入将覆盖已有内容。确认继续？',
-        importConfirm: '将解析本地 OpenCode 会话历史并导入当前 Web 视图。确认继续？',
-      },
-    },
+    // codebuddy、kimi、opencode 已弃用，不再在 fallback catalog 中展示。
+    // 底层运行时代码仍保留以向后兼容已有会话。
   ];
 
   function normalizeAgentCatalog(rawCatalog) {
@@ -2029,6 +1969,7 @@
       appendError('这个分组没有项目地址，不能直接新建项目会话。');
       return;
     }
+    // codebuddy/kimi/opencode 已弃用，不在 AGENT_CATALOG 中展示；agentOrder 保留以兼容旧会话排序
     const agentOrder = ['codex', 'claude', 'opencode', 'codebuddy', 'kimi'];
     const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
       const aIndex = agentOrder.indexOf(a.id);
@@ -6771,8 +6712,7 @@
   function showSettingsPanel() {
     send({ type: 'get_model_config' });
     send({ type: 'get_codex_config' });
-    send({ type: 'get_codebuddy_config' });
-    send({ type: 'get_kimi_config' });
+    // codebuddy/kimi 已弃用，不再请求配置
     send({ type: 'get_notify_config' });
     send({ type: 'get_cli_install_status' });
 
@@ -6821,19 +6761,7 @@
           </div>
           <div class="settings-status" id="codex-status"></div>
 
-          <div class="settings-divider"></div>
-
-          <div class="settings-section-title">CodeBuddy CLI 配置</div>
-          <div id="codebuddy-config-area"></div>
-
-          <div class="settings-divider"></div>
-
-          <div class="settings-section-title">Kimi CLI 配置</div>
-          <div id="kimi-config-area"></div>
-          <div class="settings-actions">
-            <button class="btn-save" id="kimi-save-btn">保存 Kimi 配置</button>
-          </div>
-          <div class="settings-status" id="kimi-status"></div>
+          <!-- CodeBuddy / Kimi 配置已弃用，不再展示 -->
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-appearance" role="tabpanel" data-settings-panel="appearance" hidden>
@@ -6909,12 +6837,10 @@
     if (devPageBtn) devPageBtn.addEventListener('click', openDevSettingsSubpage);
 
     function renderCliInstallStatus(status = {}) {
+      // codebuddy/kimi/opencode 已弃用，不再在 CLI 状态中展示
       const agents = [
-        { key: 'kimi', label: 'Kimi' },
         { key: 'claude', label: 'Claude' },
         { key: 'codex', label: 'Codex' },
-        { key: 'codebuddy', label: 'CodeBuddy' },
-        { key: 'opencode', label: 'OpenCode' },
       ];
       cliInstallStatusArea.innerHTML = `
         <div class="settings-cli-list">
@@ -6942,8 +6868,9 @@
 
     renderCliInstallStatus();
 
-    // === CodeBuddy Config UI ===
+    // === CodeBuddy Config UI (deprecated, hidden from UI) ===
     const codebuddyConfigArea = panel.querySelector('#codebuddy-config-area');
+    if (codebuddyConfigArea) {
     const codebuddyStatus = document.createElement('div');
     codebuddyStatus.className = 'settings-status';
     codebuddyConfigArea.insertAdjacentElement('afterend', codebuddyStatus);
@@ -7142,6 +7069,7 @@
       }
       renderCodebuddyConfigArea();
     };
+    } // end if (codebuddyConfigArea)
 
     // === Claude Config UI ===
     const claudeConfigArea = panel.querySelector('#claude-config-area');
@@ -7801,8 +7729,9 @@
       modal.querySelector('#read-codex-local-ok').addEventListener('click', closeModal);
     };
 
-    // === Kimi Config UI ===
+    // === Kimi Config UI (deprecated, hidden from UI) ===
     const kimiConfigArea = panel.querySelector('#kimi-config-area');
+    if (kimiConfigArea) {
     const kimiStatus = panel.querySelector('#kimi-status');
     const kimiSaveBtn = panel.querySelector('#kimi-save-btn');
 
@@ -8290,6 +8219,7 @@
       modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
       modal.querySelector('#read-kimi-local-ok').addEventListener('click', closeModal);
     };
+    } // end if (kimiConfigArea)
 
     // === System UI ===
     const closeBtn = panel.querySelector('.settings-close');
@@ -8677,6 +8607,7 @@
 
   function showNewSessionModal(options = {}) {
     const projectOnly = options.projectOnly === true;
+    // codebuddy/kimi/opencode 已弃用，不在 AGENT_CATALOG 中展示；agentOrder 保留以兼容旧会话排序
     const agentOrder = ['codex', 'claude', 'opencode', 'codebuddy', 'kimi'];
     const orderedAgents = AGENT_CATALOG.slice().sort((a, b) => {
       const aIndex = agentOrder.indexOf(a.id);
