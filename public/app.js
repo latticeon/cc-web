@@ -348,6 +348,7 @@
   let skipDeleteConfirm = localStorage.getItem('cc-web-skip-delete-confirm') === '1';
   let pendingInitialSessionLoad = false;
   let kimiConfigCache = null;
+  let modelConfigCache = null;
   let isSessionMultiSelectMode = false;
   let selectedSessionIds = new Set();
   let collapsedProjectKeys = new Set(loadCollapsedProjectKeys());
@@ -2176,6 +2177,48 @@
     };
   }
 
+  function getAgentProviderOptions(agent) {
+    const normalized = normalizeAgent(agent);
+    if (normalized === 'claude') {
+      const config = modelConfigCache || {};
+      return [
+        { value: '', label: '本地配置', desc: '使用本机 ~/.claude/settings.json' },
+        ...(Array.isArray(config.templates) ? config.templates : []).map((template) => ({
+          value: String(template.name || ''),
+          label: String(template.name || ''),
+          desc: template.apiBase || 'Claude 供应商模板',
+        })).filter((option) => option.value),
+      ];
+    }
+    if (normalized === 'codex') {
+      const config = codexConfigCache || {};
+      return [
+        { value: '', label: '本地配置', desc: '使用本机 Codex 登录态与配置' },
+        ...(Array.isArray(config.profiles) ? config.profiles : []).map((profile) => ({
+          value: String(profile.name || ''),
+          label: String(profile.name || ''),
+          desc: profile.apiBase || 'Codex 供应商 Profile',
+        })).filter((option) => option.value),
+      ];
+    }
+    return [];
+  }
+
+  function getCurrentAgentProvider(agent) {
+    const normalized = normalizeAgent(agent);
+    if (normalized === 'claude') {
+      return modelConfigCache?.mode === 'custom' ? String(modelConfigCache.activeTemplate || '') : '';
+    }
+    if (normalized === 'codex') {
+      return codexConfigCache?.mode === 'custom' ? String(codexConfigCache.activeProfile || '') : '';
+    }
+    return '';
+  }
+
+  function selectAgentProvider(agent, provider) {
+    send({ type: 'set_agent_provider', agent: normalizeAgent(agent), provider: String(provider || '') });
+  }
+
   function getCodexBaseModelLabel(baseModel) {
     const modelControl = getAgentModelControl(currentAgent);
     const base = String(baseModel || '').trim();
@@ -3554,6 +3597,7 @@
         break;
 
       case 'model_config':
+        modelConfigCache = msg.config || null;
         if (typeof _onModelConfig === 'function') _onModelConfig(msg.config);
         updateContextUsageDisplay();
         break;
@@ -5902,9 +5946,88 @@
 	      showCodexCombinedPicker();
 	      return;
 	    }
-	    showOptionPicker(modelControl.title || '选择模型', modelControl.options || [], currentModel, (value) => {
-	      send({ type: 'message', text: `/model ${value}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
+	    showClaudeCombinedPicker();
+  }
+
+  function showClaudeCombinedPicker() {
+    const modelControl = getAgentModelControl('claude');
+    if (!currentSessionId || modelControl?.kind !== 'preset') return;
+    hideOptionPicker();
+    let selectedProvider = getCurrentAgentProvider('claude');
+    let selectedModel = String(currentModel || 'opus');
+    const providers = getAgentProviderOptions('claude');
+    const models = modelControl.options || [];
+    if (!models.some((option) => option.value === selectedModel)) selectedModel = 'opus';
+    const overlay = document.createElement('div');
+    overlay.className = 'option-picker-overlay';
+    overlay.id = 'option-picker-overlay';
+    const picker = document.createElement('div');
+    picker.className = 'option-picker option-picker-combined';
+    picker.id = 'option-picker';
+    picker.innerHTML = `
+      <header class="option-picker-header">
+        <div>
+          <div class="option-picker-title">Claude 配置</div>
+          <div class="option-picker-subtitle">供应商和模型对 Claude 全局生效</div>
+        </div>
+        <button class="option-picker-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="option-picker-tabs" role="tablist" aria-label="Claude 配置选项">
+        <button class="option-picker-tab active" type="button" data-picker-tab="model">模型</button>
+        <button class="option-picker-tab" type="button" data-picker-tab="provider">供应商</button>
+      </div>
+      <div class="option-picker-config-body">
+        <section class="option-picker-config-section" data-picker-section="model">
+          <div class="option-picker-model-grid">
+            ${models.map((option) => `
+              <button class="option-picker-choice${option.value === selectedModel ? ' active' : ''}" type="button" data-model-value="${escapeHtml(option.value)}">
+                <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
+                <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
+                <span class="option-picker-choice-mark">✓</span>
+              </button>`).join('')}
+          </div>
+        </section>
+        <section class="option-picker-config-section" data-picker-section="provider" hidden>
+          <div class="option-picker-model-grid">
+            ${providers.map((option) => `
+              <button class="option-picker-choice${option.value === selectedProvider ? ' active' : ''}" type="button" data-provider-value="${escapeHtml(option.value)}">
+                <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
+                <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
+                <span class="option-picker-choice-mark">✓</span>
+              </button>`).join('')}
+          </div>
+        </section>
+      </div>
+      <footer class="option-picker-footer">
+        <button class="option-picker-cancel" type="button">取消</button>
+        <button class="option-picker-confirm" type="button">应用</button>
+      </footer>`;
+    overlay.appendChild(picker);
+    document.body.appendChild(overlay);
+    picker.querySelectorAll('[data-picker-tab]').forEach((tab) => tab.addEventListener('click', () => {
+      const target = tab.dataset.pickerTab;
+      picker.querySelectorAll('[data-picker-tab]').forEach((item) => item.classList.toggle('active', item === tab));
+      picker.querySelectorAll('[data-picker-section]').forEach((section) => { section.hidden = section.dataset.pickerSection !== target; });
+    }));
+    picker.querySelectorAll('[data-model-value]').forEach((button) => button.addEventListener('click', () => {
+      selectedModel = button.dataset.modelValue;
+      picker.querySelectorAll('[data-model-value]').forEach((item) => item.classList.toggle('active', item === button));
+    }));
+    picker.querySelectorAll('[data-provider-value]').forEach((button) => button.addEventListener('click', () => {
+      selectedProvider = button.dataset.providerValue;
+      picker.querySelectorAll('[data-provider-value]').forEach((item) => item.classList.toggle('active', item === button));
+    }));
+    picker.querySelector('.option-picker-close').addEventListener('click', hideOptionPicker);
+    picker.querySelector('.option-picker-cancel').addEventListener('click', hideOptionPicker);
+    picker.querySelector('.option-picker-confirm').addEventListener('click', () => {
+      if (selectedProvider !== getCurrentAgentProvider('claude')) selectAgentProvider('claude', selectedProvider);
+      hideOptionPicker();
+      if (selectedModel !== currentModel) {
+        send({ type: 'message', text: `/model ${selectedModel}`, sessionId: currentSessionId, mode: currentMode, agent: 'claude' });
+      }
     });
+    overlay.addEventListener('click', _pickerOutsideClick);
+    document.addEventListener('keydown', _pickerEscape);
   }
 
 	  function showModePicker() {
@@ -6036,6 +6159,8 @@
     const thinkingOptions = modelControl.thinkingOptions || [];
     let selectedBase = current.base;
     let selectedLevel = current.level;
+    let selectedProvider = getCurrentAgentProvider('codex');
+    const providers = getAgentProviderOptions('codex');
 
     const overlay = document.createElement('div');
     overlay.className = 'option-picker-overlay';
@@ -6051,9 +6176,12 @@
         </div>
         <button class="option-picker-close" type="button" aria-label="关闭">×</button>
       </header>
+      <div class="option-picker-tabs" role="tablist" aria-label="Codex 配置选项">
+        <button class="option-picker-tab active" type="button" data-picker-tab="model">模型</button>
+        <button class="option-picker-tab" type="button" data-picker-tab="provider">供应商</button>
+      </div>
       <div class="option-picker-config-body">
-        <section class="option-picker-config-section">
-          <div class="option-picker-section-title">模型</div>
+        <section class="option-picker-config-section" data-picker-section="model">
           <div class="option-picker-model-grid">
             ${baseOptions.map((option) => `
               <button class="option-picker-choice${option.value === selectedBase ? ' active' : ''}" type="button" data-model-value="${escapeHtml(option.value)}">
@@ -6063,7 +6191,17 @@
               </button>`).join('')}
           </div>
         </section>
-        <section class="option-picker-config-section">
+        <section class="option-picker-config-section" data-picker-section="provider" hidden>
+          <div class="option-picker-model-grid">
+            ${providers.map((option) => `
+              <button class="option-picker-choice${option.value === selectedProvider ? ' active' : ''}" type="button" data-provider-value="${escapeHtml(option.value)}">
+                <span class="option-picker-choice-label">${escapeHtml(option.label)}</span>
+                <span class="option-picker-choice-desc">${escapeHtml(option.desc || '')}</span>
+                <span class="option-picker-choice-mark">✓</span>
+              </button>`).join('')}
+          </div>
+        </section>
+        <section class="option-picker-config-section" data-picker-section="thinking">
           <div class="option-picker-section-title">思考强度</div>
           <div class="option-picker-effort-grid">
             ${thinkingOptions.map((option) => `
@@ -6093,12 +6231,24 @@
         picker.querySelectorAll('[data-thinking-value]').forEach((item) => item.classList.toggle('active', item === button));
       });
     });
+    picker.querySelectorAll('[data-picker-tab]').forEach((tab) => tab.addEventListener('click', () => {
+      const target = tab.dataset.pickerTab;
+      picker.querySelectorAll('[data-picker-tab]').forEach((item) => item.classList.toggle('active', item === tab));
+      picker.querySelectorAll('[data-picker-section]').forEach((section) => {
+        section.hidden = target === 'provider' ? section.dataset.pickerSection !== 'provider' : section.dataset.pickerSection === 'provider';
+      });
+    }));
+    picker.querySelectorAll('[data-provider-value]').forEach((button) => button.addEventListener('click', () => {
+      selectedProvider = button.dataset.providerValue;
+      picker.querySelectorAll('[data-provider-value]').forEach((item) => item.classList.toggle('active', item === button));
+    }));
     picker.querySelector('.option-picker-close').addEventListener('click', hideOptionPicker);
     picker.querySelector('.option-picker-cancel').addEventListener('click', hideOptionPicker);
     picker.querySelector('.option-picker-confirm').addEventListener('click', () => {
       const full = selectedLevel ? `${selectedBase}(${selectedLevel})` : selectedBase;
+      if (selectedProvider !== getCurrentAgentProvider('codex')) selectAgentProvider('codex', selectedProvider);
       hideOptionPicker();
-      send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: currentAgent });
+      if (full !== currentModel) send({ type: 'message', text: `/model ${full}`, sessionId: currentSessionId, mode: currentMode, agent: 'codex' });
     });
     overlay.addEventListener('click', _pickerOutsideClick);
     document.addEventListener('keydown', _pickerEscape);
@@ -7010,7 +7160,7 @@
     function renderClaudeConfigArea() {
       const isLocal = modelActiveTemplate === '';
       const tplOptions = modelEditingTemplates.map(t =>
-        `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`
+        `<option value="${escapeHtml(t.name)}"${t.name === modelActiveTemplate ? ' selected' : ''}>${escapeHtml(t.name)}</option>`
       ).join('');
 
       if (isLocal) {
@@ -7018,7 +7168,7 @@
           && (modelCurrentConfig.localSnapshot.apiKey || modelCurrentConfig.localSnapshot.apiBase);
         claudeConfigArea.innerHTML = `
           <div class="settings-field">
-            <label>激活模板</label>
+            <label>模板管理</label>
             <div style="display:flex;gap:6px;align-items:center">
               <select class="settings-select" id="claude-tpl-select" style="flex:1">
                 <option value="__local__" selected>本地配置</option>
@@ -7031,7 +7181,7 @@
             </div>
           </div>
           <div class="settings-inline-note">
-            Agent 直接使用本机 <code>~/.claude/settings.json</code> 中的 API 信息，不会覆盖或修改本机配置。
+          模板仅在此处维护；当前 Claude 使用的供应商和模型请在对话模型选择器中切换，并对所有 Claude 对话全局生效。
           </div>
         `;
         panel.querySelector('#claude-tpl-select').addEventListener('change', (e) => {
@@ -7061,7 +7211,7 @@
       const summary = tpl ? `API Key: <code>${tpl.apiKey ? '已设置' : '未设置'}</code> · Base: <code>${escapeHtml(tpl.apiBase || '默认')}</code>` : '';
       claudeConfigArea.innerHTML = `
         <div class="settings-field">
-          <label>激活模板</label>
+          <label>模板管理</label>
           <div style="display:flex;gap:6px;align-items:center">
             <select class="settings-select" id="claude-tpl-select" style="flex:1">
               <option value="__local__">本地配置</option>
@@ -7099,6 +7249,7 @@
         delBtn.addEventListener('click', () => {
           if (!modelActiveTemplate) return;
           if (!confirm(`确认删除模板「${modelActiveTemplate}」?`)) return;
+          if (modelCurrentConfig?.activeTemplate === modelActiveTemplate) modelCurrentConfig.activeTemplate = '';
           modelEditingTemplates = modelEditingTemplates.filter(t => t.name !== modelActiveTemplate);
           modelActiveTemplate = modelEditingTemplates[0]?.name || '';
           renderClaudeConfigArea();
@@ -7214,8 +7365,10 @@
         const newName = modal.querySelector('#tpl-ed-name').value.trim();
         if (newName && newName !== tpl.name) {
           if (modelEditingTemplates.find(t => t.name === newName && t !== tpl)) { alert('模板名称已存在'); return; }
+          const oldName = tpl.name;
           tpl.name = newName;
           modelActiveTemplate = newName;
+          if (modelCurrentConfig?.activeTemplate === oldName) modelCurrentConfig.activeTemplate = newName;
         }
         tpl.apiKey = modal.querySelector('#tpl-ed-apikey').value.trim();
         tpl.apiBase = modal.querySelector('#tpl-ed-apibase').value.trim();
@@ -7353,10 +7506,10 @@
     }
 
     modelSaveBtn.addEventListener('click', () => {
-      const isLocal = modelActiveTemplate === '';
+      const activeTemplate = modelCurrentConfig?.activeTemplate || '';
       const config = {
-        mode: isLocal ? 'local' : 'custom',
-        activeTemplate: isLocal ? '' : modelActiveTemplate,
+        mode: activeTemplate ? 'custom' : 'local',
+        activeTemplate,
         templates: modelEditingTemplates,
         localSnapshot: modelCurrentConfig?.localSnapshot || {},
       };
@@ -7439,13 +7592,13 @@
     function renderCodexConfigArea() {
       const isLocal = codexActiveProfile === '';
       const profileOptions = codexEditingProfiles.map((profile) =>
-        `<option value="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</option>`
+        `<option value="${escapeHtml(profile.name)}"${profile.name === codexActiveProfile ? ' selected' : ''}>${escapeHtml(profile.name)}</option>`
       ).join('');
 
       if (isLocal) {
         codexConfigArea.innerHTML = `
           <div class="settings-field">
-            <label>激活 Profile</label>
+            <label>Profile 管理</label>
             <div style="display:flex;gap:6px;align-items:center">
               <select class="settings-select" id="codex-profile-select" style="flex:1">
                 <option value="__local__" selected>本地配置</option>
@@ -7457,7 +7610,7 @@
             </div>
           </div>
           <div class="settings-inline-note">
-            直接复用本机 <code>codex</code> 的登录态与 <code>~/.codex/config.toml</code>。
+          Profile 仅在此处维护；当前 Codex 使用的供应商和模型请在对话模型选择器中切换，并对所有 Codex 对话全局生效。
           </div>
         `;
         panel.querySelector('#codex-profile-select').addEventListener('change', (e) => {
@@ -7482,7 +7635,7 @@
 
       codexConfigArea.innerHTML = `
         <div class="settings-field">
-          <label>激活 Profile</label>
+          <label>Profile 管理</label>
           <div style="display:flex;gap:6px;align-items:center">
             <select class="settings-select" id="codex-profile-select" style="flex:1">
               <option value="__local__">本地配置</option>
@@ -7515,6 +7668,7 @@
       panel.querySelector('#codex-profile-del').addEventListener('click', () => {
         if (!codexActiveProfile) return;
         if (!confirm(`确认删除 Codex Profile「${codexActiveProfile}」?`)) return;
+        if (currentCodexConfig?.activeProfile === codexActiveProfile) currentCodexConfig.activeProfile = '';
         codexEditingProfiles = codexEditingProfiles.filter((profile) => profile.name !== codexActiveProfile);
         codexActiveProfile = codexEditingProfiles[0]?.name || '';
         renderCodexConfigArea();
@@ -7571,9 +7725,11 @@
         const existing = codexEditingProfiles.find((profile) => profile.name === name);
         if (existing && existing !== current) { alert('Profile 名称已存在'); return; }
         if (current) {
+          const oldName = current.name;
           current.name = name;
           current.apiKey = apiKey;
           current.apiBase = apiBase;
+          if (currentCodexConfig?.activeProfile === oldName) currentCodexConfig.activeProfile = name;
         } else {
           codexEditingProfiles.push({ name, apiKey, apiBase });
         }
@@ -7595,14 +7751,14 @@
     };
 
     codexSaveBtn.addEventListener('click', () => {
-      const isLocal = codexActiveProfile === '';
-      if (!isLocal && codexEditingProfiles.length === 0) {
+      const activeProfile = currentCodexConfig?.activeProfile || '';
+      if (activeProfile && codexEditingProfiles.length === 0) {
         showCodexStatus('自定义模式至少需要一个 Codex Profile', 'error');
         return;
       }
       const config = {
-        mode: isLocal ? 'local' : 'custom',
-        activeProfile: isLocal ? '' : codexActiveProfile,
+        mode: activeProfile ? 'custom' : 'local',
+        activeProfile,
         profiles: codexEditingProfiles,
         enableSearch: false,
         localSnapshot: currentCodexConfig?.localSnapshot || {},

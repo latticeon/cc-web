@@ -345,7 +345,7 @@ function getSummaryApiCredentials(summaryConfig) {
     if (modelCfg.mode === 'custom' && modelCfg.activeTemplate) {
       const tpl = (modelCfg.templates || []).find(t => t.name === modelCfg.activeTemplate);
       if (tpl && tpl.apiKey && tpl.apiBase) {
-        return { apiBase: tpl.apiBase, apiKey: tpl.apiKey, model: tpl.defaultModel || tpl.opusModel || '' };
+        return { apiBase: tpl.apiBase, apiKey: tpl.apiKey, model: getRememberedAgentModel('claude') || tpl.defaultModel || tpl.opusModel || '' };
       }
     }
     return null; // local mode — no API credentials available
@@ -355,7 +355,7 @@ function getSummaryApiCredentials(summaryConfig) {
     if (codexCfg.mode === 'custom' && codexCfg.activeProfile) {
       const profile = (codexCfg.profiles || []).find(p => p.name === codexCfg.activeProfile);
       if (profile && profile.apiKey && profile.apiBase) {
-        return { apiBase: profile.apiBase, apiKey: profile.apiKey, model: summaryConfig.model || '' };
+        return { apiBase: profile.apiBase, apiKey: profile.apiKey, model: getRememberedAgentModel('codex') || summaryConfig.model || '' };
       }
     }
     return null;
@@ -3620,6 +3620,8 @@ wss.on('connection', (ws, req) => {
         activeTokens.add(authToken);
         authenticated = true;
         wsSend(ws, { type: 'auth_result', success: true, token: authToken, mustChangePassword: !!authConfig.mustChange });
+        wsSend(ws, { type: 'model_config', config: getModelConfigMasked() });
+        wsSend(ws, { type: 'codex_config', config: getCodexConfigMasked() });
         sendSessionList(ws);
       } else {
         const justBanned = recordAuthFailure(clientIP);
@@ -3703,6 +3705,9 @@ wss.on('connection', (ws, req) => {
         break;
       case 'save_model_config':
         handleSaveModelConfig(ws, msg.config);
+        break;
+      case 'set_agent_provider':
+        handleSetAgentProvider(ws, msg);
         break;
       case 'get_codex_config':
         wsSend(ws, { type: 'codex_config', config: getCodexConfigMasked() });
@@ -3898,20 +3903,35 @@ function handleSaveModelConfig(ws, newConfig) {
       haikuModel: nt.haikuModel || '',
     });
   }
+  if (merged.activeTemplate && !merged.templates.some((template) => template.name === merged.activeTemplate)) {
+    merged.activeTemplate = '';
+    merged.mode = 'local';
+  }
 
   saveModelConfig(merged);
+  const previousModel = getRememberedAgentModel('claude');
+  const previousTier = Object.entries(MODEL_MAP).find(([, value]) => value === previousModel)?.[0] || '';
 
   // Re-apply at runtime (mutate in-place to preserve agent-runtime closure reference)
   MODEL_MAP.opus = 'claude-opus-4-6';
   MODEL_MAP.sonnet = 'claude-sonnet-4-6';
   MODEL_MAP.haiku = 'claude-haiku-4-5-20251001';
   applyModelConfig();
+  if (previousTier && MODEL_MAP[previousTier]) rememberAgentModel('claude', MODEL_MAP[previousTier]);
   // custom mode: write to ~/.claude/settings.json immediately on save
   if (merged.mode === 'custom' && merged.activeTemplate) {
     const tpl = merged.templates.find(t => t.name === merged.activeTemplate);
     if (tpl) applyCustomTemplateToSettings(tpl);
   }
 
+  remapClaudeSessionsToModelMap(current, merged);
+
+  plog('INFO', 'model_config_saved', { mode: merged.mode, activeTemplate: merged.activeTemplate });
+  wsSend(ws, { type: 'model_config', config: getModelConfigMasked() });
+  wsSend(ws, { type: 'system_message', message: '模型配置已保存' });
+}
+
+function remapClaudeSessionsToModelMap(current, merged) {
   // Remap ALL Claude sessions' model to current runtime MODEL_MAP values.
   // Build reverse map from BOTH pre-save and post-save template model names:
   // - current.templates: identifies sessions created under old model names (including edited/renamed)
@@ -3950,10 +3970,66 @@ function handleSaveModelConfig(ws, newConfig) {
       } catch {}
     }
   } catch {}
+}
 
-  plog('INFO', 'model_config_saved', { mode: merged.mode, activeTemplate: merged.activeTemplate });
-  wsSend(ws, { type: 'model_config', config: getModelConfigMasked() });
-  wsSend(ws, { type: 'system_message', message: '模型配置已保存' });
+function handleSetAgentProvider(ws, msg) {
+  const agent = normalizeAgent(msg?.agent);
+  const provider = String(msg?.provider || '').trim();
+  if (agent === 'claude') {
+    const current = loadModelConfig();
+    const templates = Array.isArray(current.templates) ? current.templates : [];
+    if (provider && !templates.some((template) => template.name === provider)) {
+      return wsSend(ws, { type: 'error', message: `Claude 模板不存在: ${provider}` });
+    }
+    const merged = {
+      ...current,
+      mode: provider ? 'custom' : 'local',
+      activeTemplate: provider,
+      templates,
+    };
+    const previousModel = getRememberedAgentModel('claude');
+    const previousTier = Object.entries(MODEL_MAP).find(([, value]) => value === previousModel)?.[0] || '';
+    saveModelConfig(merged);
+    MODEL_MAP.opus = 'claude-opus-4-6';
+    MODEL_MAP.sonnet = 'claude-sonnet-4-6';
+    MODEL_MAP.haiku = 'claude-haiku-4-5-20251001';
+    applyModelConfig();
+    if (provider) {
+      const tpl = templates.find((template) => template.name === provider);
+      if (tpl) applyCustomTemplateToSettings(tpl);
+    } else if (current.localSnapshot && Object.keys(current.localSnapshot).length > 0) {
+      applyCustomTemplateToSettings(current.localSnapshot);
+    }
+    if (previousTier && MODEL_MAP[previousTier]) rememberAgentModel('claude', MODEL_MAP[previousTier]);
+    remapClaudeSessionsToModelMap(current, merged);
+    wsSend(ws, { type: 'model_config', config: getModelConfigMasked() });
+    wsSend(ws, { type: 'agent_provider_changed', agent, provider });
+    const currentClaudeModel = getRememberedAgentModel('claude') || MODEL_MAP.opus;
+    wsSend(ws, { type: 'model_changed', model: modelShortName(currentClaudeModel) || currentClaudeModel });
+    wsSend(ws, { type: 'system_message', message: `Claude 已切换为${provider ? `模板「${provider}」` : '本地配置'}` });
+    return;
+  }
+
+  if (agent === 'codex') {
+    const current = loadCodexConfig();
+    const profiles = Array.isArray(current.profiles) ? current.profiles : [];
+    if (provider && !profiles.some((profile) => profile.name === provider)) {
+      return wsSend(ws, { type: 'error', message: `Codex Profile 不存在: ${provider}` });
+    }
+    const merged = {
+      ...current,
+      mode: provider ? 'custom' : 'local',
+      activeProfile: provider,
+      profiles,
+    };
+    saveCodexConfig(merged);
+    wsSend(ws, { type: 'codex_config', config: getCodexConfigMasked() });
+    wsSend(ws, { type: 'agent_provider_changed', agent, provider });
+    wsSend(ws, { type: 'system_message', message: `Codex 已切换为${provider ? `Profile「${provider}」` : '本地配置'}` });
+    return;
+  }
+
+  wsSend(ws, { type: 'error', message: '当前 Agent 不支持切换供应商' });
 }
 
 function handleSaveCodexConfig(ws, newConfig) {
