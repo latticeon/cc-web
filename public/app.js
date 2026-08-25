@@ -6745,23 +6745,26 @@
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-ai" role="tabpanel" data-settings-panel="ai" hidden>
-          <div class="settings-section-title">Claude API 配置</div>
-          <div id="claude-config-area"></div>
-          <div class="settings-actions">
-            <button class="btn-test" id="claude-add-provider-btn">+ 添加自定义供应商</button>
+          <div class="ai-sub-tabs" role="tablist" aria-label="AI 配置分类">
+            <button class="ai-sub-tab active" type="button" role="tab" aria-selected="true" aria-controls="ai-sub-panel-claude" data-ai-sub-tab="claude">Claude</button>
+            <button class="ai-sub-tab" type="button" role="tab" aria-selected="false" aria-controls="ai-sub-panel-codex" data-ai-sub-tab="codex">Codex</button>
           </div>
-          <div class="settings-status" id="model-status"></div>
-
-          <div class="settings-divider"></div>
-
-          <div class="settings-section-title">Codex API 配置</div>
-          <div id="codex-config-area"></div>
-          <div class="settings-actions">
-            <button class="btn-test" id="codex-add-provider-btn">+ 添加自定义供应商</button>
+          <div class="ai-sub-panels">
+            <div class="ai-sub-panel active" id="ai-sub-panel-claude" role="tabpanel" data-ai-sub-panel="claude">
+              <div id="claude-config-area"></div>
+              <div class="settings-actions">
+                <button class="btn-test" id="claude-add-provider-btn">+ 添加自定义供应商</button>
+              </div>
+              <div class="settings-status" id="model-status"></div>
+            </div>
+            <div class="ai-sub-panel" id="ai-sub-panel-codex" role="tabpanel" data-ai-sub-panel="codex" hidden>
+              <div id="codex-config-area"></div>
+              <div class="settings-actions">
+                <button class="btn-test" id="codex-add-provider-btn">+ 添加自定义供应商</button>
+              </div>
+              <div class="settings-status" id="codex-status"></div>
+            </div>
           </div>
-          <div class="settings-status" id="codex-status"></div>
-
-          <!-- CodeBuddy / Kimi 配置已弃用，不再展示 -->
         </section>
 
         <section class="settings-tab-panel" id="settings-tab-appearance" role="tabpanel" data-settings-panel="appearance" hidden>
@@ -6826,6 +6829,38 @@
       });
     });
     activateSettingsTab('cli');
+
+    // === AI 配置子选项卡 (Claude / Codex) ===
+    const aiSubTabs = panel.querySelectorAll('[data-ai-sub-tab]');
+    const aiSubPanels = panel.querySelectorAll('[data-ai-sub-panel]');
+    const activateAiSubTab = (tabName) => {
+      aiSubTabs.forEach((tab) => {
+        const active = tab.dataset.aiSubTab === tabName;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+      });
+      aiSubPanels.forEach((subPanel) => {
+        const active = subPanel.dataset.aiSubPanel === tabName;
+        subPanel.classList.toggle('active', active);
+        subPanel.hidden = !active;
+      });
+    };
+    aiSubTabs.forEach((tab) => {
+      tab.addEventListener('click', () => activateAiSubTab(tab.dataset.aiSubTab));
+      tab.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const tabs = Array.from(aiSubTabs);
+        const currentIndex = tabs.indexOf(tab);
+        const offset = event.key === 'ArrowRight' ? 1 : -1;
+        const nextTab = tabs[(currentIndex + offset + tabs.length) % tabs.length];
+        activateAiSubTab(nextTab.dataset.aiSubTab);
+        nextTab.focus();
+      });
+    });
+    activateAiSubTab('claude');
+
     const cliInstallStatusArea = panel.querySelector('#cli-install-status-area');
     const themePageBtn = panel.querySelector('[data-open-theme-page]');
     if (themePageBtn) themePageBtn.addEventListener('click', openThemeSubpage);
